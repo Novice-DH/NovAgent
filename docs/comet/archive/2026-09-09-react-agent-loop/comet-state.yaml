@@ -1,0 +1,278 @@
+schema: comet.native.v4
+name: react-agent-loop
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+shape_confirmation_hash: 122624a608fe036e75650eb75506c25b0b195a939cee04095fc88a5a046621d6
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: ReAct 循环产出完整事件序列 WHEN 以临时 workspace 和注入的 FakeModel（第一轮返回
+      `write_file` 写 `note.txt` 内容 `"hi"` 的 tool_call，第二轮返回纯文本 `"All done."`）调用
+      `stream_agent_events("create a note", workspace=ws, model=fake)` THEN 事件
+      `type` 依次为
+      `ai_message`、`tool_call`、`tool_result`、`ai_message`、`final_answer` AND
+      `tool_call` 事件 name 为 `write_file` 且 args 为 `{"file_path": "note.txt",
+      "content": "hi"}` AND `final_answer` 事件 content 为 `"All done."` AND
+      workspace 中出现 `note.txt` 且内容为 `"hi"` AND 第二轮发给模型的消息最后一条是 `ToolMessage`，其
+      `tool_call_id` 等于 tool_call 的 id，content 为 `json.dumps` 后的结果。'
+    result: passed
+    reason:
+      text: 独立内联复验与测试均确认：事件序列依次为
+        ai_message/tool_call/tool_result/ai_message/final_answer，tool_call 为
+        write_file 且 args {"file_path":"note.txt","content":"hi"}，final_answer 为
+        "All done."，note.txt 内容为 hi，ToolMessage.tool_call_id 等于 call_1 且 content
+        == json.dumps(result)
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: Scenario: 消息构建使用 ACTOR_PROMPT WHEN 检查 FakeModel 收到的第一轮消息 THEN 依次为
+      SystemMessage 与 HumanMessage AND SystemMessage.content 等于
+      `novagent.core.agent.ACTOR_PROMPT` AND HumanMessage.content 等于传入的 task AND
+      `ACTOR_PROMPT` 以 \"You are the actor node in novagent's ReAct workflow.\"
+      开头。"
+    result: passed
+    reason:
+      text: 首轮消息依次为 SystemMessage(ACTOR_PROMPT) 与 HumanMessage(task)，内容分别等于模块常量与传入
+        task；程序化验证 ACTOR_PROMPT 以 "You are the actor node in novagent's ReAct
+        workflow." 开头
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: 'A3: Scenario: 工具异常转为错误回传 WHEN FakeModel 第一轮请求 `read_file`（目标文件不存在），第二轮返回
+      `"Handled."` THEN 调用 `stream_agent_events` 不抛出异常 AND `tool_result` 事件
+      result 以 `"Error:"` 开头 AND 第二轮消息最后一条 `ToolMessage.content` 以 `"Error:"`
+      开头。'
+    result: passed
+    reason:
+      text: 'read_file 对缺失文件抛异常被 _execute_tool 捕获，不向调用方抛出；tool_result 事件 result 以
+        Error: 开头；ToolMessage.content 为 json.dumps 序列化文本，字面以 "Error:
+        起始、json.loads 后以 Error: 开头，符合验收意图'
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A4: Scenario: 未知工具名回传错误 WHEN FakeModel 第一轮请求未注册的 `no_such_tool`，第二轮返回
+      `"Ok."` THEN `tool_result` 事件 result 包含 `"unknown tool"` AND 流程以
+      `final_answer` 事件正常结束。'
+    result: passed
+    reason:
+      text: "未知工具返回含 unknown tool 的错误文本（Error: unknown tool 'no_such_tool'）进入
+        ToolMessage 与 tool_result 事件，流程以 final_answer(\"Ok.\") 正常结束"
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Scenario: max_loops 限制模型调用轮数 WHEN FakeModel 每轮都返回 tool_call 且以
+      `max_loops=3` 调用 `stream_agent_events` THEN 模型恰好被调用 3 次 AND 生成器仍产出
+      `final_answer` 事件。"
+    result: passed
+    reason:
+      text: 循环为 for _ in range(max_loops)，max_loops=3 时模型恰好被调用 3 次，循环结束仍产出
+        final_answer 事件，测试断言 len(model.calls)==3
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: 'A6: Scenario: CLI 用 rich 实时打印事件 WHEN 将 `novagent.cli.app`
+      依赖的模型与事件流替换为假实现（monkeypatch），使 `stream_agent_events` 依次产出
+      `tool_call`（`bash`，`{"command": "echo
+      hi"}`）、`tool_result`（`"hi"`）、`final_answer`（`"Done."`）后用 CliRunner 运行 `run
+      "demo task" --workspace <临时目录>` THEN 退出码 0 AND 输出按顺序包含工具名 `bash`、命令参数
+      `echo hi`、结果 `hi` 与最终回答 `Done.`。'
+    result: passed
+    reason:
+      text: CLI run 命令消费 monkeypatch 假事件流，CliRunner 退出码 0，rich 打印顺序含 bash、echo
+        hi、hi、Done.，四种事件分支均经 escape 转义；独立复跑测试通过
+      truncated: false
+builder_handoff:
+  candidate_id: 07d46501-81ff-407d-b2fc-bb4ffc02dc1f
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:9e0d1270-ecfa-4893-a74d-237210e9c832
+  iteration: 1
+  summary:
+    text: '本轮实现：新增 src/novagent/core/agent.py，按用户伪代码逐事件实现 ReAct 循环
+      stream_agent_events(task, *, workspace, max_loops=10,
+      model=None)——RuntimeState(workspace)→SystemMessage(ACTOR_PROMPT)+HumanMessage(task)→model.bind_tools(build_tools(state))→最多
+      max_loops 轮 invoke/append/yield ai_message，无 tool_calls 即 break，否则逐个 yield
+      tool_call、执行工具、append ToolMessage(content=json.dumps(result),
+      tool_call_id=...)、yield tool_result；循环结束 yield final_answer(最后一轮 AI
+      文本)。ACTOR_PROMPT 与用户原文逐字一致（程序化比对 EXACT MATCH）。工具异常与未知工具名转为 Error:
+      文本回传模型。改写 src/novagent/cli/app.py：移除旧内联
+      _run_agent/_tool_system_prompt/MAX_ITERATIONS，run 命令消费事件流并用 rich.Console
+      实时打印四种事件（全部经 rich.markup.escape 转义，含 Workspace 路径行），保留缺 OPENAI_API_KEY 时
+      stderr 红字+退出码 1。pyproject.toml 新增 rich>=13.0.0 并同步 uv.lock（rich
+      15.0.0）。tests/test_agent_loop.py 改写为 5 个 FakeModel 离线用例（事件序列/ACTOR_PROMPT
+      消息构建/错误回传/未知工具/max_loops），tests/test_cli.py 新增 rich 打印顺序验证。处理验收项：A1-A6
+      全部。开发期检查：uv run pytest 43 passed；uv lock --check 一致；uv run novagent --help
+      退出码 0。已知限制：ai_message content 为多块 list 时以 str() 降级为 repr 字符串（满足 JSON
+      可序列化约束）；A3 中 ToolMessage.content 按 A1 的 json.dumps 要求序列化，字面以 "Error: 起始（含
+      JSON 引号），json.loads 后以 Error: 起始；CLI 显示的 workspace 为用户传入路径形式（默认仍为绝对路径）。'
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+  checks:
+    - name:
+        text: uv run pytest -q
+        truncated: false
+      result: passed
+      note:
+        text: 43 passed（全部离线，无网络请求）
+        truncated: false
+    - name:
+        text: uv lock --check
+        truncated: false
+      result: passed
+      note:
+        text: uv.lock 与 pyproject.toml 一致，rich 15.0.0 已锁定
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，含位置参数 task 与 --workspace 选项
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: ai_message content 为多块 list 时用 str() 降级为 repr 字符串（可 JSON 序列化）
+      truncated: false
+    - text: 'A3 的 ToolMessage.content 为 json.dumps 序列化文本，字面以 \"Error: 起始，json.loads 后以
+        Error: 起始（与 A1 的 json.dumps 要求一致）'
+      truncated: false
+    - text: CLI 打印的 workspace 路径为用户传入形式；stream_agent_events 内部仍经 RuntimeState 规范化为绝对路径
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核执行（Explore subagent，无写权限）核对 A1-A6 全部通过：事件序列与伪代码语义逐条一致，ACTOR_PROMPT
+        程序化比对逐字相同，CLI 四种事件分支与 escape 使用正确，改动未超出声明范围；其发现的 Workspace 行未转义低危问题已由
+        Builder 修复（escape(str(workspace_path))）并复跑 43 个测试通过。
+      truncated: false
+    reviewer_execution_ref: explore-subagent:agent_b47fa00c-7605-495b-830b-37ada5bc424a
+  submitted_at: 2026-09-09T15:12:01.558Z
+blockers: []
+verification:
+  candidate_id: 07d46501-81ff-407d-b2fc-bb4ffc02dc1f
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:e5c7cf91-b71b-4186-9495-281d8857411a
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: pytest-suite
+      name:
+        text: uv run pytest -q 全量离线测试
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8357
+    - id: lock-consistency
+      name:
+        text: uv lock --check 锁文件一致性
+        truncated: false
+      argv_display:
+        - text: lock
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 72
+    - id: cli-help
+      name:
+        text: uv run novagent --help CLI 入口
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2533
+  summary:
+    text: 实现与验收场景逐条吻合：stream_agent_events 按伪代码逐事件产出，ACTOR_PROMPT 逐字满足开头要求，错误回传与
+      max_loops 语义正确，ToolMessage 一律 json.dumps 序列化；CLI 已移除内联循环并改用 rich 实时打印（全量
+      escape）。独立复跑 pytest（43 passed）、uv lock --check、novagent --help 均通过，并以内联
+      FakeModel 程序化复验 A1 关键断言全部为真。六项验收全部通过，verdict 为 pass。
+    truncated: false
+  risks:
+    - text: A6 测试 index("Done.")/index("bash") 从输出头部搜索，若临时 workspace 路径恰含相应子串可能误判顺序（当前
+        pytest tmp 路径不会命中，低概率脆弱性，非实现缺陷）
+      truncated: false
+    - text: 已知限制：ai_message content 为多块 list 时以 str() 降级为 repr 字符串以保证事件可 JSON
+        序列化，仅在模型返回多块内容时触发
+      truncated: false
+    - text: ToolMessage.tool_call_id 在模型未返回 id 时以空串兜底，属合理降级
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-09T15:20:14.740Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 实现与验收场景逐条吻合：stream_agent_events 按伪代码逐事件产出，ACTOR_PROMPT 逐字满足开头要求，错误回传与
+        max_loops 语义正确，ToolMessage 一律 json.dumps 序列化；CLI 已移除内联循环并改用 rich 实时打印（全量
+        escape）。独立复跑 pytest（43 passed）、uv lock --check、novagent --help 均通过，并以内联
+        FakeModel 程序化复验 A1 关键断言全部为真。六项验收全部通过，verdict 为 pass。
+      truncated: false
+    completed_at: 2026-09-09T15:20:14.740Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-09T14:38:02.834Z
