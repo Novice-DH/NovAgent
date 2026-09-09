@@ -1,0 +1,313 @@
+schema: comet.native.v4
+name: scaffold-novagent
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+shape_confirmation_hash: 7b71fcff3701e590455ffa9900624c25a15ef197a31f51f61735dba3a850ac82
+spec_changes:
+  - capability: novagent
+    operation: create
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "Scenario: uv 环境与 CLI 入口 WHEN 在仓库根目录运行 `uv sync` THEN 依赖安装成功并生成 `uv.lock`
+      AND `uv run novagent --help` 退出码为 0，帮助文本包含位置参数 `task` 和选项 `--workspace`"
+    result: passed
+    reason:
+      text: "自行复跑 uv sync 退出码 0（Resolved 55/Audited 51 packages）；uv.lock 存在且 uv lock
+        --check 一致，pyproject.toml 为 name=novagent、src layout（uv_build
+        后端）、requires-python>=3.10，运行依赖恰为
+        langchain-openai/python-dotenv/typer（dev: pytest），锁中无 langgraph 与完整
+        langchain 发行包；uv run novagent --help 退出码 0，帮助文本含位置参数 task 与选项
+        --workspace；uv run python -m novagent --help 亦为 0（__main__.py 调用
+        cli.app:main）。"
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "Scenario: 工具注册 WHEN 以临时目录为 workspace 构造 `RuntimeState` 并调用
+      `build_tools(state)` THEN 返回 5 个 `StructuredTool`，名称依次为
+      `read_file`、`write_file`、`edit_file`、`grep`、`bash`"
+    result: passed
+    reason:
+      text: 独立探针：以系统临时目录为 workspace 构造 RuntimeState 后 build_tools(state) 返回 5 个
+        langchain_core StructuredTool，名称依次为
+        read_file/write_file/edit_file/grep/bash（registry.py
+        顺序一致）；test_registry.py 断言顺序、类型与各工具 args_schema 字段。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "Scenario: 文件工具路径安全与读写改语义 WHEN `FileReadTool` 读取 workspace 内的文本文件 THEN
+      返回文件内容，`offset`/`limit` 可截取指定行范围 AND 传入解析后逃逸出 workspace 的 `file_path`（如
+      `../x.txt` 或外部绝对路径）时报错且不产生读取/写入 AND `FileWriteTool` 可在 workspace
+      内创建含父目录的新文件并覆写已有文件 AND `FileEditTool` 将唯一匹配的 `old_text` 替换为 `new_text` AND
+      `old_text` 无匹配或多处匹配时报错且文件内容保持不变"
+    result: passed
+    reason:
+      text: 探针实证：write_file 在 workspace 内创建含父目录新文件并可覆写；read_file 返回内容且
+        offset=2/limit=2 得 'l2\nl3'；外部绝对路径写入被 ValueError 拒绝且目标文件未产生，../
+        逃逸被拒；edit_file 唯一匹配替换成功，0 匹配与 2 处匹配均报错且文件内容保持不变。paths.py 先
+        Path.resolve()（含 .. 与符号链接）再以 root in resolved.parents
+        校验，逃逸报错含被拒路径。tests/test_file_tools.py、test_paths.py 全覆盖且 41/41 通过。
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "Scenario: grep 与 bash 工具 WHEN `GrepTool` 以正则 `pattern` 搜索 workspace THEN
+      按 `glob` 过滤文件、按 `ignore_case` 决定大小写敏感、最多返回 `head_limit` 条 `相对路径:行号:行内容`
+      形式的匹配 AND `GrepTool` 的 `path` 逃逸出 workspace 时报错 AND `BashTool` 以 workspace
+      为工作目录执行 `command` 并返回含退出码的输出 AND 超过 `timeout_seconds` 的命令被终止并报超时错误"
+    result: passed
+    reason:
+      text: "探针实证：grep 输出为 相对路径:行号:行内容（a.py:1:def f():），glob=**/*.md 只命中 md
+        文件，ignore_case=True 命中大小写变体，head_limit 截断生效，path='..' 逃逸报错，非法正则报
+        ValueError；bash 以 workspace 为 cwd（cd 输出临时 workspace 路径）、非零退出码
+        'exit_code: 3' 正常返回不抛异常；关键超时探针（子进程再孵 sleep(30)
+        孙进程并持有管道，timeout_seconds=2）墙钟 2.22s 抛 TimeoutError，独立证实 bash_tool.py 的
+        Popen+CREATE_NEW_PROCESS_GROUP/start_new_session+taskkill/killpg
+        进程树终止真实生效；test_bash_tool.py 含 <8s 墙钟断言。"
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "Scenario: 模型工厂 WHEN 目录 `.env` 中配置 `OPENAI_API_KEY` 后调用 `create_model()`
+      THEN 返回 `langchain_openai.ChatOpenAI` 实例，其 api_key 来自 `.env` AND 缺少
+      `OPENAI_API_KEY` 时报清晰的配置错误而非 ImportError/AttributeError"
+    result: passed
+    reason:
+      text: 探针实证：临时目录 .env 写入 OPENAI_API_KEY 后 create_model() 返回
+        langchain_openai.chat_models.base.ChatOpenAI 实例，api_key 取自
+        .env（sk-probe-123），默认 model gpt-4o-mini；清空环境后缺 key 抛出含配置指引的 ValueError（非
+        ImportError/AttributeError）。openai_provider.py 用
+        load_dotenv(find_dotenv(usecwd=True))，OPENAI_MODEL/OPENAI_BASE_URL
+        可选逻辑与规格一致；test_openai_provider.py 覆盖 .env 读取、模型覆盖与缺 key 报错，且密钥未被测试输出泄露。
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: 'Scenario: CLI 任务执行与 workspace 自动创建 WHEN 运行 `uv run novagent "整理文件"
+      --workspace <不存在的目录>` THEN 该目录（含父目录）被自动创建 AND 在缺少 `OPENAI_API_KEY`
+      的环境中以清晰错误信息退出而非未捕获异常崩溃'
+    result: passed
+    reason:
+      text: "端到端探针：env -u OPENAI_API_KEY uv run novagent \"整理文件\" --workspace
+        <不存在三级嵌套目录> 退出码 1，stdout 打印 Workspace 路径，stderr 输出 'Configuration error:
+        OPENAI_API_KEY is not set...'，无任何 Traceback（grep 计
+        0），且目标目录（含全部父目录）已被自动创建。cli/app.py 在 create_model 之前 mkdir(parents=True,
+        exist_ok=True)，ValueError 转 typer.Exit(1)；test_cli.py 以 CliRunner 覆盖默认
+        workspace 创建、嵌套创建与缺 key 清晰退出，test_agent_loop.py 用 FakeModel
+        离线验证工具循环/错误回填/25 轮上限。"
+      truncated: false
+builder_handoff:
+  candidate_id: 9912c033-0df7-4d30-a7a1-2599c3b7f020
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:c7c27623-27a7-4113-a6cf-788823a35237
+  iteration: 1
+  summary:
+    text: "完成 novagent 项目脚手架：uv init --package（src
+      layout，requires-python>=3.10，uv_build）+ 依赖
+      langchain-openai/typer/python-dotenv（dev: pytest）。实现
+      RuntimeState(workspace) 与 resolve_in_workspace 路径安全（resolve 后逃逸报错）；五个
+      StructuredTool（read_file/write_file/edit_file/grep/bash）经
+      build_tools(state) 注册；edit_file 强制唯一匹配（0/多处报错且文件不变）；grep 用
+      os.walk+fnmatch（不跟随目录符号链接，**/ 前缀兼容 pathlib 语义）；bash 用 Popen+进程树终止（Windows
+      taskkill /T /F，POSIX killpg）实现真实超时；create_model() 从 .env 读
+      OPENAI_API_KEY（缺 key 报 ValueError）、OPENAI_MODEL 默认
+      gpt-4o-mini、OPENAI_BASE_URL 可选；typer 单命令 CLI novagent <task> --workspace
+      自动创建 workspace 并运行手工工具调用循环（最大 25 轮，工具异常回传模型）。41 个离线 pytest 覆盖全部验收场景。复核发现的
+      Windows bash 超时不生效（孙进程持管道阻塞 30s）已按复核意见修复并经定向复核确认。"
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+  checks:
+    - name:
+        text: uv sync
+        truncated: false
+      result: passed
+      note:
+        text: 依赖安装成功，uv.lock 与 pyproject 一致
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，含位置参数 task 与 --workspace 选项
+        truncated: false
+    - name:
+        text: uv run python -m novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 模块入口行为一致
+        truncated: false
+    - name:
+        text: uv run pytest -q
+        truncated: false
+      result: passed
+      note:
+        text: 41/41 通过：路径逃逸（../与绝对路径）、read offset/limit、write 建父目录、edit 唯一匹配语义、grep
+          glob/ignore_case/head_limit/二进制跳过、bash cwd 与超时墙钟断言（sleep30/timeout2 实测
+          2.23s）、build_tools 注册 5 工具、create_model 读 .env 与缺 key 报错、CLI workspace
+          自动创建与缺 key 清晰退出
+        truncated: false
+    - name:
+        text: CLI 缺 key 端到端探针
+        truncated: false
+      result: passed
+      note:
+        text: OPENAI_API_KEY 为空时 workspace 已创建、输出 Configuration error、退出码 1、无 traceback
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: bash 超时兜底分支（taskkill 后收集仍超时再 process.kill()）在子进程脱离进程树且持有管道时无时间上界，实际风险可忽略
+      truncated: false
+    - text: Windows 上 os.walk 仍遍历 workspace 内循环 junction（被 MAX_PATH 截断，实测 0.22s 终止）；外向
+        junction 逃逸一律被拒绝
+      truncated: false
+    - text: Windows 上 bash 工具为 cmd.exe 语义（shell=True 走 COMSPEC），工具名仍为 bash
+      truncated: false
+    - text: 按需求为离线验收，未发起真实 LLM 网络调用的端到端验证
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: "只读复核员两轮审查：首轮通读全部源码与测试并实证探针（路径逃逸含 junction 穿透写入、edit 语义、uv sync/novagent
+        --help/pytest 41 通过），发现 bash 超时在 Windows 不生效（高）与测试缺口（中）等问题；Builder
+        修复后定向复核确认三处修复正确（独立探针：sleep30/timeout2→2.23s、无限循环孙进程→2.24s、三层进程树→2.28s，均\
+        不再挂起；grep 循环不再递归；41/41 回归通过），无无关改动混入，最终 VERDICT: PASSED，余两条提示级残留已记入
+        known_limits。"
+      truncated: false
+    reviewer_execution_ref: explore-review-agent_fe67e71e-da84-417e-8297-7f0013a9a78a-round2
+  submitted_at: 2026-09-09T13:08:31.482Z
+blockers: []
+verification:
+  candidate_id: 9912c033-0df7-4d30-a7a1-2599c3b7f020
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:689e4e5c-0117-4609-89e8-3343e1d72d3a
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync installs dependencies
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 1701
+    - id: pytest
+      name:
+        text: offline pytest suite
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8730
+    - id: cli-help
+      name:
+        text: novagent CLI help entry
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2968
+  summary:
+    text: 全部正式检查（uv sync、uv run pytest -q 41/41、uv run novagent --help）由 Verifier
+      独立复跑通过，并以系统临时目录探针实证 A2–A6 运行时行为：5 个 StructuredTool
+      命名与顺序正确；文件工具路径逃逸（../与绝对路径）拒绝且不产生写入、读写改语义符合规格；grep 的
+      glob/ignore_case/head_limit/相对路径:行号:内容与 path 逃逸校验成立；bash
+      cwd=workspace、退出码回报、以及含孙进程持管道场景下 timeout=2 实测 2.22s
+      的进程树终止超时均真实生效；create_model 从 .env 读 key 且缺 key 报清晰 ValueError；CLI 自动创建嵌套
+      workspace 并在缺 key 时以清晰错误、退出码 1、零 traceback 退出。依赖范围与规格一致（无 langgraph、无完整
+      langchain）。六个验收场景全部通过，仅有若干提示级平台语义风险，不构成验收障碍。
+    truncated: false
+  risks:
+    - text: Windows 上 bash 工具实际为 cmd.exe 语义（shell=True 走 COMSPEC），工具名仍为 bash，模型在
+        Windows 下生成的 POSIX 命令可能语义不符（Builder known_limits 亦已声明；不影响离线验收）
+      truncated: false
+    - text: bash 超时兜底分支：taskkill 后 5s 宽限内 communicate 仍超时会再 process.kill() 并无限期
+        communicate，理论上若存在脱离进程树且持有管道的进程则无时间上界（实测三组探针均未触发）
+      truncated: false
+    - text: read_file 使用 errors='replace' 读取，非法 UTF-8 字节被静默替换而非报错；grep
+        对无法解码文件直接跳过，均为宽松语义
+      truncated: false
+    - text: Windows 上 os.walk 仍会进入 workspace 内的循环 junction（受 MAX_PATH 截断自限），外向
+        junction 逃逸一律被 resolve 校验拒绝
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-09T13:17:23.184Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 全部正式检查（uv sync、uv run pytest -q 41/41、uv run novagent --help）由 Verifier
+        独立复跑通过，并以系统临时目录探针实证 A2–A6 运行时行为：5 个 StructuredTool
+        命名与顺序正确；文件工具路径逃逸（../与绝对路径）拒绝且不产生写入、读写改语义符合规格；grep 的
+        glob/ignore_case/head_limit/相对路径:行号:内容与 path 逃逸校验成立；bash
+        cwd=workspace、退出码回报、以及含孙进程持管道场景下 timeout=2 实测 2.22s
+        的进程树终止超时均真实生效；create_model 从 .env 读 key 且缺 key 报清晰 ValueError；CLI 自动创建嵌套
+        workspace 并在缺 key 时以清晰错误、退出码 1、零 traceback 退出。依赖范围与规格一致（无 langgraph、无完整
+        langchain）。六个验收场景全部通过，仅有若干提示级平台语义风险，不构成验收障碍。
+      truncated: false
+    completed_at: 2026-09-09T13:17:23.184Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-09T12:29:34.584Z
