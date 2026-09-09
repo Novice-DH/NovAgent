@@ -44,3 +44,27 @@ def test_default_workspace_is_created(tmp_path, monkeypatch):
     result = runner.invoke(app, ["tidy the files"], env={"OPENAI_API_KEY": ""})
     assert (tmp_path / "workspace").exists()
     assert result.exit_code == 1
+
+
+def test_rich_prints_tool_call_result_and_final_answer(tmp_path, monkeypatch):
+    from novagent.cli import app as app_module
+
+    def fake_stream(task, *, workspace, model=None, max_loops=10):
+        yield {"type": "ai_message", "content": "Let me check."}
+        yield {"type": "tool_call", "name": "bash", "args": {"command": "echo hi"}}
+        yield {"type": "tool_result", "name": "bash", "result": "hi"}
+        yield {"type": "final_answer", "content": "Done."}
+
+    monkeypatch.setattr(app_module, "create_model", lambda: object())
+    monkeypatch.setattr(app_module, "stream_agent_events", fake_stream)
+    result = runner.invoke(
+        app, ["demo task", "--workspace", str(tmp_path / "ws")]
+    )
+    assert result.exit_code == 0
+    text = _output(result)
+    assert "Let me check." in text
+    pos_bash = text.index("bash")
+    pos_args = text.index("echo hi")
+    pos_result = text.index("hi", pos_args + len("echo hi"))
+    pos_final = text.index("Done.")
+    assert 0 <= pos_bash < pos_args < pos_result < pos_final
