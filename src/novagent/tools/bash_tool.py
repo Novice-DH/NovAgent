@@ -34,6 +34,41 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
             process.kill()
 
 
+def execute_command(
+    command: str, cwd, timeout_seconds: float = 30.0
+) -> tuple[int | None, str, str]:
+    """以 ``cwd`` 为工作目录执行 shell 命令，返回 ``(exit_code, stdout, stderr)``。
+
+    超过 ``timeout_seconds`` 时终止整棵子进程树并抛出 ``TimeoutError``；
+    命令无法执行时向调用方抛出底层异常。
+    """
+    if timeout_seconds <= 0:
+        raise ValueError(f"timeout_seconds must be > 0, got {timeout_seconds}")
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+        **_popen_kwargs(),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_KILL_COLLECT_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+        raise TimeoutError(
+            f"Command timed out after {timeout_seconds} seconds: {command}"
+        ) from None
+    return process.returncode, stdout, stderr
+
+
 def create_bash_tool(state: RuntimeState) -> StructuredTool:
     def bash(command: str, timeout_seconds: float = 30.0) -> str:
         """Run a shell command with the workspace as working directory.
@@ -49,33 +84,10 @@ def create_bash_tool(state: RuntimeState) -> StructuredTool:
         Returns:
             The exit code together with captured stdout and stderr.
         """
-        if timeout_seconds <= 0:
-            raise ValueError(f"timeout_seconds must be > 0, got {timeout_seconds}")
-        process = subprocess.Popen(
-            command,
-            cwd=state.workspace,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
-            **_popen_kwargs(),
+        exit_code, stdout, stderr = execute_command(
+            command, cwd=state.workspace, timeout_seconds=timeout_seconds
         )
-        try:
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(process)
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=_KILL_COLLECT_GRACE_SECONDS
-                )
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate()
-            raise TimeoutError(
-                f"Command timed out after {timeout_seconds} seconds: {command}"
-            ) from None
-        parts = [f"exit_code: {process.returncode}"]
+        parts = [f"exit_code: {exit_code}"]
         if stdout:
             parts.append(f"stdout:\n{stdout.rstrip()}")
         if stderr:

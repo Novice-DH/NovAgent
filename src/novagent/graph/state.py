@@ -23,6 +23,12 @@ class VerificationResult(TypedDict):
     stderr: str
 
 
+class VerificationCheck(TypedDict):
+    name: str
+    passed: bool
+    detail: str
+
+
 class NovGraphState(TypedDict, total=False):
     task: str
     runtime: RuntimeState
@@ -36,3 +42,6 @@ class NovGraphState(TypedDict, total=False):
     attempts: int
     max_attempts: int
     final_answer: str
+    last_actor_summary: str
+    last_error: str
+    verification_checks: list[VerificationCheck]

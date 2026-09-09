@@ -8,7 +8,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from novagent.core.state import RuntimeState
-from novagent.graph.state import NovGraphState, TodoItem, VerificationResult
+from novagent.graph.state import (
+    NovGraphState,
+    TodoItem,
+    VerificationCheck,
+    VerificationResult,
+)
 
 
 def test_todo_item_annotations():
@@ -46,6 +51,9 @@ def test_nov_graph_state_fields_and_total():
         "attempts",
         "max_attempts",
         "final_answer",
+        "last_actor_summary",
+        "last_error",
+        "verification_checks",
     ]
     assert annotations["task"] is str
     assert annotations["runtime"] is RuntimeState
@@ -61,6 +69,9 @@ def test_nov_graph_state_fields_and_total():
     assert annotations["attempts"] is int
     assert annotations["max_attempts"] is int
     assert annotations["final_answer"] is str
+    assert annotations["last_actor_summary"] is str
+    assert annotations["last_error"] is str
+    assert typing.get_args(annotations["verification_checks"]) == (VerificationCheck,)
 
 
 def test_messages_uses_add_messages_reducer():

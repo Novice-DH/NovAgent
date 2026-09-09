@@ -21,3 +21,11 @@ def build_tools(state: RuntimeState) -> list[StructuredTool]:
         create_grep_tool(state),
         create_bash_tool(state),
     ]
+
+
+def build_read_only_tools(state: RuntimeState) -> list[StructuredTool]:
+    """构建只读工具集（无写副作用、无命令执行），供只读核查使用。"""
+    return [
+        create_file_read_tool(state),
+        create_grep_tool(state),
+    ]
