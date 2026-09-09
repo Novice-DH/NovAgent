@@ -1,0 +1,29 @@
+[project]
+name = "novagent"
+version = "0.1.0"
+description = "从 ToolCall 到通用 Agent"
+readme = "README.md"
+authors = [
+    { name = "Manus-DH", email = "hdong_go@outlook.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-openai>=1.6.1",
+    "python-dotenv>=1.2.3",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+novagent = "novagent.cli.app:main"
+
+[build-system]
+requires = ["uv_build>=0.8.18,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
