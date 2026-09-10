@@ -1,0 +1,278 @@
+schema: comet.native.v4
+name: graph-workflow
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+shape_confirmation_hash: c07c619597729b067dd15f40f03eedcf533e4349778abd267f794bdf249bf26e
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: 组装四节点工作流 WHEN 调用 `build_workflow()` THEN 返回已编译图 AND 图节点集合恰为
+      `{"planner", "actor", "verifier", "final"}` AND 从 START 出发的边指向 `"planner"`
+      AND `"final"` 的出边指向 END。'
+    result: passed
+    reason:
+      text: 探针实测 build_workflow()
+        编译成功，nodes={__start__,planner,actor,verifier,final}，边
+        __start__→planner、planner→actor、actor→verifier、final→__end__、verifier
+        条件边 {final:final,planner:planner}，签名 keyword-only model=None
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: Scenario: 离线端到端一次通过 WHEN 构造初始状态（task、runtime 指向临时
+      workspace、max_attempts=3），注入 FakeModel 依次返回（planner 调 `todo_write`
+      提交计划，验证命令为 `\"<python>\" -c \"print('ok')\"`；actor 第一轮 `write_file` 写
+      `result.txt`、第二轮纯文本结束；verifier 输出 `passed=true` 的 JSON）并调用
+      `build_workflow(model=fake).invoke(state)` THEN 最终状态 `passed is
+      True`、`final_answer` 为成功格式文本（含 \"completed\" 与 attempts 数）、todos 全部
+      `completed`、`attempts == 1` AND FakeModel 共被调用 4 次（1+2+1，证明路径
+      planner→actor→verifier→final）AND workspace 出现 `result.txt`。"
+    result: passed
+    reason:
+      text: FakeModel 端到端实测 passed=True、attempts=1、模型调用恰 4 次（1+2+1，bindings 首工具依次
+        todo_write/read_file/read_file）、final_answer 含 completed/1/all
+        good、todos 全 completed、result.txt 写出
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: Scenario: 失败后回 planner 修订再通过 WHEN FakeModel 依次返回（第一轮 planner
+      提交计划，验证命令为 `\"<python>\" -c \"raise SystemExit(1)\"`；actor 纯文本结束；verifier
+      输出 `passed=false` 且 reason 为 \"tests broke\" 的 JSON；第二轮 planner
+      提交修订计划，验证命令为 `\"<python>\" -c \"print('ok')\"`；actor 纯文本结束；verifier 输出
+      `passed=true` 的 JSON）invoke 同一图 THEN 最终 `passed is True`、`attempts == 2`
+      AND 第二轮 planner 收到的 HumanMessage 包含 \"tests broke\" AND FakeModel 共被调用 6
+      次（2+1+1 + 1+1）。"
+    result: passed
+    reason:
+      text: 失败重试路径实测 attempts=2、FakeModel 调用 6 次（2+1+1+1+1）、第二轮 planner 消息为
+        HumanMessage 且含 'tests broke'
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A4: Scenario: final_node 格式化成败 WHEN 以 `{"passed": True, "attempts": 1,
+      "final_answer": "all good"}` 调用 `final_node` THEN 返回更新 `final_answer` 含
+      "completed"、"1" 与 "all good" AND 以 `{"passed": False, "attempts": 3,
+      "last_error": "boom"}` 调用 THEN 返回更新 `final_answer` 含 "failed"、"3" 与 "boom"
+      AND 两种情况均不包含 `passed` 键（不翻转判定）。'
+    result: passed
+    reason:
+      text: >-
+        final_node 成功返回 'Task completed in 1 attempt(s). all good'，失败返回 'Task
+        failed after 3 attempt(s).
+
+        Last error: boom'，两种返回键均仅 final_answer，不翻转 passed
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Scenario: stage2 提示词与引用一致 WHEN 导入 `novagent.prompts.stage2` THEN
+      四个常量均非空字符串 AND `PLANNER_PROMPT` 含 \"todo_write\" AND `ACTOR_PROMPT` 以
+      \"You are the actor node in novagent's LangGraph workflow.\" 开头 AND
+      `VERIFIER_PROMPT` 含 `\"passed\"` AND `FINAL_PROMPT` 非空 AND
+      `novagent.graph.nodes` 模块级名字
+      `PLANNER_PROMPT`、`VERIFIER_PROMPT`、`ACTOR_PROMPT` 与 stage2 的对应常量 `is`
+      同一对象。"
+    result: passed
+    reason:
+      text: 四常量非空，PLANNER_PROMPT 含 todo_write，ACTOR_PROMPT 以指定句开头，VERIFIER_PROMPT 含
+        "passed"；graph.nodes.PLANNER/VERIFIER/ACTOR_PROMPT 与 stage2 对应常量 is
+        同一对象；FINAL_PROMPT grep 仅 stage2.py 定义与测试引用，无运行时调用
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "A6: Scenario: 现有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且 `uv.lock`
+      一致（无新依赖）AND `uv run pytest` 全部通过（离线）AND `uv run novagent --help` 退出码 0 AND
+      `core.agent.ACTOR_PROMPT` 原文不变（`stream_agent_events` 首轮 SystemMessage
+      仍为其自身）。"
+    result: passed
+    reason:
+      text: 独立复跑 pytest 69 passed、novagent --help exit 0；git diff core/agent.py
+        为空，core ACTOR_PROMPT 仍以 ReAct workflow
+        开头（agent.py:14）；pyproject.toml/uv.lock 零 diff，无新依赖
+      truncated: false
+builder_handoff:
+  candidate_id: 6498053b-d885-4449-9614-05e02fdfe170
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:4a9dc49d-5542-403a-814b-e0470e0004a4
+  iteration: 1
+  summary:
+    text: 本轮组装 stage2 LangGraph 工作流并集中提示词：新增 src/novagent/graph/workflow.py 的
+      build_workflow(*, model=None)——StateGraph(NovGraphState) 注册
+      planner/actor/verifier（functools.partial 绑定注入 model，None 时节点内部
+      create_model()，无参调用等价用户伪代码）与 final 四节点，边
+      START→planner→actor→verifier，verifier 经 verifier_route 条件边路由
+      {final:'final', planner:'planner'}，final→END，返回 compile()。新增 prompts 包与
+      stage2.py：PLANNER_PROMPT/ACTOR_PROMPT（stage2 版，按计划执行+todo_update
+      汇报）/VERIFIER_PROMPT/FINAL_PROMPT（注明预留，运行时零调用）。nodes.py 删除本地提示词定义改为从 stage2
+      导入（三常量与 stage2 is 同一对象），新增 final_node（确定性格式化 final_answer：成功含
+      completed/attempts/原因，失败含 failed/attempts/last_error；不调 LLM、不改 passed）。新增
+      tests/test_graph_workflow.py 6 个离线测试：图结构、端到端一次通过（4 次模型调用证明路径、todos 全
+      completed、文件落盘、final_answer 成功格式）、失败重试（6 次调用、attempts==2、修订 HumanMessage 含
+      tests broke）、final_node 格式化、stage2 常量与引用同一对象、stage1 ACTOR_PROMPT
+      不变。test_graph_nodes.py 仅改导入来源。处理全部验收项 A1-A6。开发期检查：uv run pytest 69
+      passed（离线）、uv run novagent --help 退出码 0、uv lock --check
+      一致（无新依赖）。已知限制：无新增；FINAL_PROMPT 为预留常量不接线。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+  checks:
+    - name:
+        text: uv run pytest
+        truncated: false
+      result: passed
+      note:
+        text: 69 passed，全部离线
+        truncated: false
+    - name:
+        text: uv lock --check
+        truncated: false
+      result: passed
+      note:
+        text: 无新依赖，锁一致
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，现有 CLI 行为不受影响
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: FINAL_PROMPT 为预留常量，本阶段未接线到任何 LLM 调用（final_node 保持确定性）
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核逐项确认 A1-A6 全部 ok：探针实测图编译与节点集合/边、端到端一次通过与重试路径的调用次数与状态、final_node
+        两种格式化、stage2 四常量内容与 nodes.py 同一对象引用、FINAL_PROMPT 运行时零调用、git diff 确认
+        core/agent.py 一字未改；图拓扑与用户伪代码完全一致，Python 3.10 兼容。复核自行复跑 pytest 69
+        passed。无问题发现。
+      truncated: false
+    reviewer_execution_ref: agent_1d717c0a-2f57-4cd8-abb9-caaaed816304
+  submitted_at: 2026-09-10T12:19:38.995Z
+blockers: []
+verification:
+  candidate_id: 6498053b-d885-4449-9614-05e02fdfe170
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:6838ed7e-fd7a-4e32-a6c0-f91443f08bde
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync 依赖安装
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 72
+    - id: uv-lock-check
+      name:
+        text: uv lock --check 锁一致
+        truncated: false
+      argv_display:
+        - text: lock
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 55
+    - id: pytest-suite
+      name:
+        text: uv run pytest 全量离线测试
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 7687
+    - id: cli-help
+      name:
+        text: uv run novagent --help CLI 可用
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2514
+  summary:
+    text: A1-A6 全部通过：图拓扑、双路径端到端、final_node 格式化、stage2 常量唯一来源与 core 零改动均经独立探针证实。
+    truncated: false
+  risks: []
+  risks_truncated: false
+  completed_at: 2026-09-10T12:22:33.095Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: A1-A6 全部通过：图拓扑、双路径端到端、final_node 格式化、stage2 常量唯一来源与 core 零改动均经独立探针证实。
+      truncated: false
+    completed_at: 2026-09-10T12:22:33.095Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T12:08:52.700Z
