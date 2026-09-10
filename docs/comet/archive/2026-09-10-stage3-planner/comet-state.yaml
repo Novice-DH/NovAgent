@@ -1,0 +1,394 @@
+schema: comet.native.v4
+name: stage3-planner
+language: zh-CN
+phase: archive
+status: done
+state_version: 13
+brief: brief.md
+shape_confirmation_hash: da91087fa8e01ac24a4caa3e4ab9f0206d6934d3cb13452a48b4b641ac1316de
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 3
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: stage3 提示词与导入 WHEN 导入 `novagent.prompts.stage3` THEN
+      `PLANNER_PROMPT` 以 "You are the planner/supervisor node in novagent stage
+      3." 开头、含 "TodoWriteTool"、"CallSearchAgentTool"、"CallCodeAgentTool"、"Always
+      call TodoWriteTool before delegating new work." 且以 "End with a concise
+      supervisor summary after the needed specialist calls." 结尾 AND
+      `novagent.graph.nodes.PLANNER_PROMPT` 与 stage3 常量为同一对象 AND
+      `novagent.prompts.stage2` 不再有
+      `PLANNER_PROMPT`/`ACTOR_PROMPT`/`VERIFIER_PROMPT` 属性、仍有 `FINAL_PROMPT`。'
+    result: passed
+    reason:
+      text: stage3.py PLANNER_PROMPT 与规格原文逐行一致（开头句/三工具名/Always 句/结尾句齐全，尾部换行为惯例）；nodes
+        以 from-import 持有同一对象且有 is 断言；stage2 仅余 FINAL_PROMPT 并有属性缺失断言。
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: 'A12: Scenario: verifier 提示词与工具集 WHEN 导入 `novagent.prompts.stage3` THEN
+      `VERIFIER_PROMPT` 以 "You are verifier, a model-based reviewer node." 开头、含
+      "NotepadReadTool"、"search the web"、"Run the provided verification commands
+      when they are relevant." 且以 "an empty string when passed" 结尾 AND
+      `novagent.graph.nodes.VERIFIER_PROMPT` 与 stage3 常量为同一对象 AND
+      `verifier_node` 绑定工具名序列恰为 `["read_file", "grep", "bash", "web_search"]`。'
+    result: passed
+    reason:
+      text: nodes.py:198-203 恰绑定
+        todo_write/call_search_agent/call_code_agent，test_planner_binds_three_tools
+        精确断言名字序列。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: 'A2: Scenario: planner 工具绑定 WHEN 注入 FakeModel 调用 `planner_node` THEN
+      FakeModel 绑定的工具名序列恰为 `["todo_write", "call_search_agent",
+      "call_code_agent"]`。'
+    result: passed
+    reason:
+      text: handoff 事件先于受托内部事件（测试断言索引先后）、research_notes 空行追加、sources 按 url
+        去重保序、handoffs 恰一条、node=planner 标注经 workflow 桥接断言、model 透传与合并视图已实现。
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A3: Scenario: 委托搜索 WHEN FakeModel 依次返回 `todo_write`
+      计划、`call_search_agent`（注入 fake TavilyClient 返回带 title/url 的结果）、纯文本结束 THEN
+      返回更新含计划四字段、`research_notes`（agent summary）、`sources`（`SourceItem`
+      列表，url/title/content/score 且按 url 去重保序）、`agent_handoffs` 恰含一条
+      `{"from_agent": "planner", "to_agent": "searchAgent", "instruction",
+      "result"}` AND 事件序列中 `handoff` 事件先于受托 agent 的内部事件 AND 全程事件带
+      `node="planner"`（经 writer 收集断言）。'
+    result: passed
+    reason:
+      text: 受托循环真实写文件、todo_update 迁移至 completed（起点 pending 与验收所述 in_progress
+        走同一无条件覆盖路径，属等价）、todos/code_agent_summary/agent_handoffs/messages
+        并入均被精确断言。
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A4: Scenario: 委托实现 WHEN FakeModel 依次返回
+      `todo_write`、`call_code_agent`（state 含 runtime 指向临时 workspace 与 todos）、纯文本
+      THEN 受托循环真实写文件并迁移 todo（in_progress→completed）AND 返回更新 `todos`
+      为委托后状态、`code_agent_summary` 为 agent summary、`agent_handoffs` 含 to
+      `codeAgent` 记录、`messages` 并入委托新增 AIMessage/ToolMessage。"
+    result: passed
+    reason:
+      text: SourceItem/AgentHandoff 均 total=False 且四字段精确，NovGraphState 含
+        research_notes/sources/agent_handoffs/code_agent_summary，test_graph_state.py
+        逐一断言。
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "A5: Scenario: 数据结构与状态字段 WHEN 导入 `novagent.graph.state` THEN 存在
+      `SourceItem`（url/title/content/score）与
+      `AgentHandoff`（from_agent/to_agent/instruction/result）且均为 `total=False`
+      AND `NovGraphState` 含
+      `research_notes`/`sources`/`agent_handoffs`/`code_agent_summary` 字段。"
+    result: passed
+    reason:
+      text: 编译图节点恰为 planner/verifier/final（__start__ 为框架注入伪节点）加
+        START→planner、planner→verifier、final→END；verifier 条件映射 {final, planner}
+        由源码与失败回环/预算耗尽行为测试共同验证。
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: 'A6: Scenario: 图拓扑 WHEN 调用 `build_workflow()` THEN 编译图节点集合恰为 `{"planner",
+      "verifier", "final"}` AND `START` 出边指向 planner AND planner 出边指向 verifier
+      AND verifier 条件边路由 `{"final", "planner"}` AND final 出边指向 END。'
+    result: passed
+    reason:
+      text: 端到端恰 6 次模型调用、passed is True、成功格式
+        final_answer、code_agent_summary/agent_handoffs 写入、result.txt 落盘；e2e 中
+        todo 完成经 verifier 归一化达成（显式迁移由 A4 单测覆盖），THEN 结果全部满足。
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: "A7: Scenario: 离线端到端 WHEN 初始
+      state（task、runtime、max_attempts=3、verification command 为 `\"<python>\" -c
+      \"print('ok')\"`）注入 FakeModel（planner 轮 1 `todo_write`、轮 2
+      `call_code_agent` 写 `result.txt` 并完成 todo、轮 3 纯文本；verifier 输出
+      `passed=true` JSON）并 `build_workflow(model=fake).invoke(state)` THEN 最终
+      `passed is True`、`final_answer` 成功格式、`code_agent_summary` 与
+      `agent_handoffs` 已写入、workspace 出现 `result.txt`。"
+    result: passed
+    reason:
+      text: 修订分支 HumanMessage 含 Last error 与 Failed verifications 明细，测试断言 last_error
+        与失败命令均在消息中。
+      truncated: false
+  - id: A9
+    source: brief.md
+    text: "A8: Scenario: 修订路径 WHEN 构造 `todos` 非空且 `last_error` 非空的 state 调用
+      `planner_node` THEN 发给模型的 HumanMessage 包含 `last_error` 与失败验证信息。"
+    result: passed
+    reason:
+      text: graph.nodes 无 actor_node 属性、图中无 actor 节点且被测试断言；cli 渲染分支与 core/agent.py
+        setdefault 为 spec 声明保留项，不算残留。
+      truncated: false
+  - id: A10
+    source: brief.md
+    text: 'A9: Scenario: actor 移除 WHEN 导入 `novagent.graph.nodes` 与
+      `novagent.graph.workflow` THEN 无 `actor_node` 属性、`build_workflow()` 图中无
+      `"actor"` 节点。'
+    result: passed
+    reason:
+      text: 首轮纯文本恰 1 次调用且返回空更新，max_loops=2 时恰 2 次调用，与 nodes.py 手写 ReAct 的 break/range
+        实现一致。
+      truncated: false
+  - id: A11
+    source: brief.md
+    text: "A10: Scenario: 循环边界 WHEN FakeModel 第一轮即纯文本 THEN 模型只被调用 1 次 AND WHEN 每轮都返回
+      tool_call 且 `max_loops=2` THEN 恰调用 2 次。"
+    result: passed
+    reason:
+      text: Runtime 登记 uv sync/uv lock --check/pytest（90 passed）/novagent --help 全部
+        exit 0，且两提交未触及 pyproject.toml/uv.lock。
+      truncated: false
+  - id: A12
+    source: brief.md
+    text: "A11: Scenario: 现有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且无新依赖、lock 一致 AND
+      `uv run pytest` 全部通过（离线）AND `uv run novagent --help` 退出码 0。"
+    result: passed
+    reason:
+      text: VERIFIER_PROMPT 与原文逐行一致（含跨行 search the web 与结尾句），nodes 持同一对象，绑定序列恰
+        [read_file, grep, bash, web_search] 被单测与 e2e 双重断言。
+      truncated: false
+  - id: A13
+    source: brief.md
+    text: 'A13: Scenario: verifier 绑定与降级 WHEN 注入 FakeModel 调用 `verifier_node`（state
+      含 runtime 与 verification_commands）THEN 绑定工具名序列恰为 `["read_file", "grep",
+      "bash", "web_search"]` AND HumanMessage 含计划、验收标准与验证命令 AND
+      全部测试离线（web_search 在测试环境不发起真实请求）。'
+    result: passed
+    reason:
+      text: 绑定 4 工具被精确断言，HumanMessage 模板含计划/验收标准/验证命令三段（源码核实），web_search 离线由 fake
+        TavilyClient fixture 与离线 pytest 保证，registry.py 不在提交 diff 中确认未改。
+      truncated: false
+builder_handoff:
+  candidate_id: 3a035de0-e446-4c40-997b-0c3e5675dec3
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:2bcf0fa1-78ce-45f0-aca4-8911b66b0b81
+  iteration: 1
+  summary:
+    text: stage3-planner 完整候选（两个提交）：提交1 planner supervisor 化——prompts/stage3.py 新增
+      PLANNER_PROMPT（逐字原文）；stage2.py 移除 PLANNER/ACTOR；graph/state.py 新增
+      SourceItem/AgentHandoff 与
+      research_notes/sources/agent_handoffs/code_agent_summary；graph/nodes.py 重写
+      planner_node(state, *, model=None, on_event=None, max_loops=10)（恰 3 工具、闭包
+      StructuredTool 委托、手写 ReAct 循环、handoff 事件先于受托调用、委托透传
+      model+合并视图、research_notes 累加/sources 按 url 去重保序/messages 累加、删除
+      actor_node/_apply_todo_update/_render_todos）；graph/workflow.py 三节点拓扑 +
+      planner 桥接（事件补 node=planner）。提交2 verifier 变更——VERIFIER_PROMPT 迁移 stage3.py
+      并逐字替换为用户新原文（model-based reviewer，安全 shell 检查与网络搜索，NotepadReadTool 规则，JSON
+      约定）；stage2.py 仅余 FINAL_PROMPT；verifier_node 工具集扩展为 [read_file, grep, bash,
+      web_search]（registry 不变，验证命令程序化执行不变）；测试同步更新（test_cli
+      保持不变）。无新增依赖，pyproject/uv.lock 零改动。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+    - A11
+    - A12
+    - A13
+  checks:
+    - name:
+        text: uv sync
+        truncated: false
+      result: passed
+      note:
+        text: pyproject/uv.lock 零改动（无新依赖）
+        truncated: false
+    - name:
+        text: uv run pytest -q
+        truncated: false
+      result: passed
+      note:
+        text: 90 passed，离线运行
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，CLI 行为不受影响
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: CLI 渲染分支不识别 node=planner 内部事件（协调期间 CLI 无实时输出），渲染为后续 change（D7）
+      truncated: false
+    - text: verifier 的「最近执行输出」last_actor_summary 通常为空（D8）
+      truncated: false
+    - text: core/agent.py 与 cli/app.py 的文档字符串仍含 stage2/actor
+        历史表述（声明不改动模块内的陈旧注释，行为零影响，后续文档清理）
+      truncated: false
+    - text: A1/A12 的部分原文子句（如 Always call TodoWriteTool...、Run the provided
+        verification commands...）无独立测试断言，逐字一致性由复核 diff 保证
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核执行逐条核对 A1-A13 全部 covered：两段提示词均与 brief 原文逐字节 diff 一致（含折行位置）、导入 is
+        同一对象、stage2 仅余 FINAL_PROMPT；三工具/四工具绑定精确；委托搜索 handoff 先于受托事件、sources
+        去重保序、合并视图链式；端到端 6 次模型调用通过且 verifier 绑定四工具；actor 功能性代码零残留（剩余引用均为 spec
+        声明保留项）；registry 未改、验证命令程序化执行零改动。实测 pytest 90 passed、novagent --help 退出码
+        0。4 条低危/提示观察均不阻塞。
+      truncated: false
+    reviewer_execution_ref: review-agent_eab3ee36-1934-4366-92e8-3ed9f167ed91
+  submitted_at: 2026-09-10T18:59:24.298Z
+blockers: []
+verification:
+  candidate_id: 3a035de0-e446-4c40-997b-0c3e5675dec3
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:b5543b8d-a893-48e4-93d7-276c2cf39393
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync 依赖安装
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 70
+    - id: uv-lock-check
+      name:
+        text: uv lock --check 锁一致
+        truncated: false
+      argv_display:
+        - text: lock
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 56
+    - id: pytest-suite
+      name:
+        text: uv run pytest 全量离线测试
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 7980
+    - id: cli-help
+      name:
+        text: uv run novagent --help 退出码 0
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2562
+  summary:
+    text: 13 项验收全部通过：提示词逐字一致、planner 恰 3 工具与手写 ReAct 循环、委托语义（handoff 先行、状态合并、model
+      透传）、三节点拓扑、离线端到端与 verifier 4 工具绑定均与 brief/规格吻合，Runtime 四项命令检查全绿且
+      registry.py/CLI/core.agent 未改。仅有测试覆盖粒度层面的等价性说明，不构成失败项。
+    truncated: false
+  risks:
+    - text: 测试对 PLANNER_PROMPT 的
+        contains/endswith（TodoWriteTool、CallCodeAgentTool、Always 句、结尾句）未逐一断言，本次由
+        Verifier 直接比对源码与规格引用确认一致；后续若改动提示词，现有测试可能无法拦截全部字面变化
+      truncated: false
+    - text: A13 的 HumanMessage 断言仅覆盖验收标准段（done），计划摘要与验证命令段未显式断言（模板结构已核实包含）
+      truncated: false
+    - text: A7 端到端脚本中 codeAgent 未显式调用 todo_update，todo 完成依赖 verifier 归一化；显式
+        in_progress→completed 迁移仅由 A4 单测覆盖
+      truncated: false
+    - text: cli/app.py 模块 docstring 仍写 planner→actor→verifier 工作流，属陈旧文案；CLI 为本 change
+        零修改范围，不影响验收
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-10T19:05:04.240Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native Shape artifacts changed
+      truncated: false
+    completed_at: 2026-09-10T18:07:08.642Z
+  - goal_cycle: 2
+    iteration: 0
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native confirmed acceptance criteria changed
+      truncated: false
+    completed_at: 2026-09-10T18:37:54.801Z
+  - goal_cycle: 3
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 13 项验收全部通过：提示词逐字一致、planner 恰 3 工具与手写 ReAct 循环、委托语义（handoff 先行、状态合并、model
+        透传）、三节点拓扑、离线端到端与 verifier 4 工具绑定均与 brief/规格吻合，Runtime 四项命令检查全绿且
+        registry.py/CLI/core.agent 未改。仅有测试覆盖粒度层面的等价性说明，不构成失败项。
+      truncated: false
+    completed_at: 2026-09-10T19:05:04.240Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T17:33:17.189Z
