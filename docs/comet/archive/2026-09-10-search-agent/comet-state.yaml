@@ -1,0 +1,294 @@
+schema: comet.native.v4
+name: search-agent
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+shape_confirmation_hash: 8a699def829398b01c1f048927eb3d16d09054faa6ed336943155bb96edfcf1a
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: 缺少 API key 的降级 WHEN 未设置 `TAVILY_API_KEY` 时 invoke
+      `WebSearchTool`（query 任意）THEN 返回 dict `ok is False` 且 `error == "missing
+      TAVILY_API_KEY"` 且携带传入 query AND 全程不发起网络请求、不抛异常。'
+    result: passed
+    reason:
+      text: web_search_tool.py 缺 key 分支返回 error 恰为 "missing TAVILY_API_KEY"
+        且不构造客户端不发网络请求，测试精确断言 error 字符串与 query 透传
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: Scenario: 正常搜索返回 WHEN 设置 `TAVILY_API_KEY` 且注入 fake `TavilyClient`（返回
+      answer 与多条 results）后 invoke `WebSearchTool` THEN 返回 `ok is True` 的 dict 且
+      `query` 透传、`answer` 为 API answer、`results` 每项恰含 `title/url/content/score`
+      四键（API 缺键补空值）AND fake 的 search 收到 `max_results` 透传。"
+    result: passed
+    reason:
+      text: 结果归一化为恰含 title/url/content/score 四键（缺键补 ""/0.0），测试断言整 dict 相等且 fake 收到
+        max_results=2 与 include_answer=True 透传
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: Scenario: 搜索异常降级 WHEN fake `TavilyClient.search` 抛异常 THEN
+      `WebSearchTool` 返回 `ok is False` 且 `error` 非空且携带 query AND 不抛异常。"
+    result: passed
+    reason:
+      text: "客户端构造与 search 异常均被捕获转为 {ok: False, query, error}，BoomClient 测试断言不抛异常且
+        error 含原始异常信息"
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A4: Scenario: ReAct 循环与返回结构 WHEN 以 `state={"task": ..., "research_notes":
+      ...}`、instruction 与收集型 writer 注入 FakeModel（第一轮返回 `web_search`
+      tool_call，第二轮纯文本）调用 `run_search_agent` THEN 返回 `ok is True` 且 `summary`
+      为最后 AI 文本 AND `queries` 含所发查询 AND `sources` 为结果 url（去重保序）AND `messages`
+      依次为 AIMessage（带 tool_call）、ToolMessage（内容为合法 JSON）、AIMessage（纯文本）AND
+      `tool_events` 依次含 `tool_call` 与 `search_results` 事件且 writer 收到同一批事件。'
+    result: passed
+    reason:
+      text: 返回 dict 恰为 {ok, summary, queries, sources, messages, tool_events}
+        六键，测试断言消息序列 AIMessage/ToolMessage(合法JSON)/AIMessage、事件依次为 tool_call 与
+        search_results 且 writer 收到同一批事件
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Scenario: 消息构造 WHEN 调用 `run_search_agent` THEN 发给模型的首条消息为
+      SystemMessage 且内容即 `SEARCH_AGENT_PROMPT` AND 第二条 HumanMessage 同时包含
+      task、instruction 与已有研究笔记文本。"
+    result: passed
+    reason:
+      text: 首条消息为 SystemMessage(SEARCH_AGENT_PROMPT)，HumanMessage 同时包含
+        task、instruction 与 research_notes（缺失时标注 no research notes yet），均有测试断言
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "A6: Scenario: 循环边界 WHEN FakeModel 每轮都返回 tool_call 且 `max_loops=2` THEN
+      模型恰被调用 2 次后返回 AND WHEN FakeModel 第一轮即返回纯文本 THEN 模型只被调用 1 次（提前结束）。"
+    result: passed
+    reason:
+      text: range(max_loops) 加无 tool_calls 即 break，测试覆盖每轮 tool_call 时 max_loops=2 恰调用
+        2 次与首轮纯文本仅调用 1 次两个方向
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: 'A7: Scenario: 提示词常量 WHEN 导入 `novagent.agents.search_agent` THEN
+      `SEARCH_AGENT_PROMPT` 以 "You are searchAgent, a focused research
+      specialist." 开头 AND 含 "WebSearchTool" AND 含 "Do not write files or produce
+      application code."。'
+    result: passed
+    reason:
+      text: SEARCH_AGENT_PROMPT 与 brief 原文逐行比对逐字一致：开头句、WebSearchTool、Do not write
+        files or produce application code. 均在
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: "A8: Scenario: 现有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且 lock 与 pyproject
+      一致（新增 tavily-python）AND `uv run pytest` 全部通过（离线）AND `uv run novagent
+      --help` 退出码 0。"
+    result: passed
+    reason:
+      text: pyproject 新增 tavily-python>=0.5.0 且 uv.lock 含 tavily-python 0.8.1
+        一致；WebSearchTool 未进 registry、tavily 导入不扩散、agents/__init__.py 为空包；Runtime
+        命令检查（pytest 81 passed、--help exit 0）全部通过
+      truncated: false
+builder_handoff:
+  candidate_id: a15755bb-fe18-4861-a280-7eb5e25c5e1e
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:e07e1d7d-493d-484e-b68a-3230c1be7267
+  iteration: 1
+  summary:
+    text: 实现 search-agent 候选：新增 src/novagent/tools/web_search_tool.py（模块级
+      WebSearchTool=StructuredTool 名 web_search，args query/max_results=5；先
+      load_dotenv 再读 TAVILY_API_KEY，缺失返回 {ok:False,query,error:'missing
+      TAVILY_API_KEY'} 且不构造客户端；有 key 时 TavilyClient.search(query,
+      max_results=..., include_answer=True)，成功返回
+      {ok:True,query,answer,results:[{title,url,content,score}]} 四键归一化，异常转
+      {ok:False,query,error} 不外泄）；新增 src/novagent/agents/__init__.py 与
+      search_agent.py（SEARCH_AGENT_PROMPT 逐字用户原文；run_search_agent(state,
+      instruction, *, writer=None, max_loops=4,
+      model=None)：SystemMessage(SEARCH_AGENT_PROMPT)+HumanMessage(task+instruction+research_notes)，bind_tools([WebSearchTool])，手写
+      ReAct 循环，无 tool_calls 提前结束，ToolMessage=json.dumps(result)，收集 queries 与去重保序
+      sources，writer 发 tool_call/search_results 事件并收集 tool_events，返回
+      {ok:True,summary,queries,sources,messages,tool_events}）；pyproject/uv.lock
+      新增 tavily-python==0.8.1；新增 tests/test_web_search_tool.py（5 用例）与
+      tests/test_search_agent.py（7 用例），全部离线（FakeModel、fake
+      TavilyClient、monkeypatch env/dotenv）。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+  checks:
+    - name:
+        text: uv sync
+        truncated: false
+      result: passed
+      note:
+        text: 成功，新增 tavily-python==0.8.1，uv.lock 与 pyproject 一致
+        truncated: false
+    - name:
+        text: uv run pytest -q
+        truncated: false
+      result: passed
+      note:
+        text: 81 passed（含 12 个新增用例），离线运行
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，现有 CLI 行为不受影响
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: 未知工具错误文本用 repr 格式（unknown tool 'x'），spec 占位符语义下的轻微差异
+      truncated: false
+    - text: 未知工具调用也会发 search_results 事件（name 为实际调用名），spec 未明确规定该边角
+      truncated: false
+    - text: Tavily 响应归一化在 try/except 之外，若 API 返回非 dict 理论上可逸出 AttributeError（真实 API
+        契约下概率极低）
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核执行逐条核对 A1-A8 全部 covered：提示词逐字一致、返回 dict 恰 6 键、事件类型与顺序正确、缺 key
+        不发请求、sources 去重保序、循环边界双路径覆盖、tavily 仅在 web_search_tool 导入且未进入 build_tools
+        注册表、测试全离线（本机 .env 无 TAVILY_API_KEY，桩 dotenv 后用例确定）。实测 pytest 81
+        passed、novagent --help 退出码 0。4 条低危观察均不阻塞。
+      truncated: false
+    reviewer_execution_ref: review-agent_b68b1e3f-79bd-4f8b-8623-4263031f3870
+  submitted_at: 2026-09-10T15:52:32.143Z
+blockers: []
+verification:
+  candidate_id: a15755bb-fe18-4861-a280-7eb5e25c5e1e
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:3184e1d6-98f8-4a62-b4ed-46d3ec50b1dd
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync 依赖安装
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 70
+    - id: uv-lock-check
+      name:
+        text: uv lock --check 锁一致
+        truncated: false
+      argv_display:
+        - text: lock
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 59
+    - id: pytest-suite
+      name:
+        text: uv run pytest 全量离线测试
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8109
+    - id: cli-help
+      name:
+        text: uv run novagent --help 退出码 0
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2507
+  summary:
+    text: 8 项验收全部通过：工具与搜索 Agent 的实现、离线测试、依赖与包结构均与 brief/spec 一致，A1/A7
+      等逐字级要求经直接比对确认无偏差，仅存在两处验收范围外的极小鲁棒性风险。
+    truncated: false
+  risks:
+    - text: 未知工具名的调用也会发出 search_results 事件且 name 为未知工具名（规格字面写 name 为 web_search），A4
+        场景（web_search）行为完全一致，属验收范围外的极小偏差
+      truncated: false
+    - text: 结果归一化中 float(item.get("score")) 位于 try 块之外，若 Tavily 返回非数值 score 字符串会抛出
+        ValueError 外泄；规格仅要求缺键补空值，畸形值不在验收范围
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-10T15:58:41.285Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 8 项验收全部通过：工具与搜索 Agent 的实现、离线测试、依赖与包结构均与 brief/spec 一致，A1/A7
+        等逐字级要求经直接比对确认无偏差，仅存在两处验收范围外的极小鲁棒性风险。
+      truncated: false
+    completed_at: 2026-09-10T15:58:41.285Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T15:21:36.342Z
