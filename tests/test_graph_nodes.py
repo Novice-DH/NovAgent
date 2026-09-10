@@ -6,7 +6,6 @@ import sys
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from novagent.core.agent import ACTOR_PROMPT
 from novagent.core.state import RuntimeState
 from novagent.graph.nodes import (
     PLANNER_PROMPT,
@@ -16,6 +15,7 @@ from novagent.graph.nodes import (
     verifier_node,
     verifier_route,
 )
+from novagent.prompts.stage2 import ACTOR_PROMPT
 from novagent.tools.todo_tools import create_todo_update_tool, create_todo_write_tool
 
 

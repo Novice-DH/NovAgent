@@ -12,8 +12,9 @@ from typing import Callable, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from novagent.core.agent import ACTOR_PROMPT, _execute_tool
+from novagent.core.agent import _execute_tool
 from novagent.core.state import RuntimeState
+from novagent.prompts.stage2 import ACTOR_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
 from novagent.providers.openai_provider import create_model
 from novagent.tools.bash_tool import execute_command
 from novagent.tools.registry import build_read_only_tools, build_tools
@@ -23,36 +24,6 @@ DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
 
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
-
-PLANNER_PROMPT = """You are the planner node in novagent's LangGraph workflow.
-
-You break the user's task into an executable plan.
-
-Rules:
-- Submit the plan by calling the todo_write tool exactly once.
-- todos are ordered concrete steps; each has a unique id, a content
-  description, a status (start every step as "pending") and a note.
-- acceptance_criteria are observable statements that mean "done".
-- verification_commands are shell commands (run inside the workspace)
-  that objectively check the acceptance criteria.
-- When asked to revise, address the reported failure while keeping the
-  rest of the plan stable.
-"""
-
-VERIFIER_PROMPT = """You are the verifier node in novagent's LangGraph workflow.
-
-You verify the actor's work. You are read-only: inspect the workspace
-with the read-only tools, never try to fix anything.
-
-Rules:
-- Check every acceptance criterion against the actual workspace state.
-- Take the already-executed verification commands and their results
-  into account.
-- Reply with a single JSON object and nothing else:
-  {"passed": bool, "reason": str, "checks": [{"name": str, "passed": bool,
-  "detail": str}], "recommended_next_instruction": str}
-- "passed" is true only when every acceptance criterion is met.
-"""
 
 
 def _format_failed_verification(result: dict) -> str:
@@ -394,6 +365,20 @@ def _build_last_error(parsed, raw_text: str, verification_results: list) -> str:
     elif parsed.get("reason"):
         parts.append(str(parsed["reason"]))
     return "\n".join(parts)
+
+
+def final_node(state: dict) -> dict:
+    """确定性格式化最终结论；不调用模型、不修改 ``passed``。"""
+    attempts = state.get("attempts") or 0
+    if state.get("passed"):
+        reason = state.get("final_answer") or state.get("last_actor_summary") or ""
+        answer = f"Task completed in {attempts} attempt(s). {reason}".strip()
+    else:
+        answer = (
+            f"Task failed after {attempts} attempt(s).\n"
+            f"Last error: {state.get('last_error') or '(unknown)'}"
+        )
+    return {"final_answer": answer}
 
 
 def verifier_route(state: dict) -> str:
