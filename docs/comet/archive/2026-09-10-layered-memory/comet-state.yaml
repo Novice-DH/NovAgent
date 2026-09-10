@@ -1,0 +1,333 @@
+schema: comet.native.v4
+name: layered-memory
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+shape_confirmation_hash: 55a57b78cda546793c00cda71f94a4ceb4209f85b7c25a9cc6baefa63ab91c96
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: RULES_LAYER 常量 WHEN 导入 `novagent.graph.memory` THEN
+      `RULES_LAYER` 为 dict 且 `scope == "workspace"`、`storage == "internal"` AND
+      `rules` 为 5
+      条非空字符串列表，逐条覆盖工作区限定、相对路径约定、上下文外置、三类文件语义（TODO.md/NOTEPAD.md/HISTORY_SUMMARY.md）与"不暴露
+      memory 写工具"。'
+    result: passed
+    reason:
+      text: memory.py:44-56 定义
+        RULES_LAYER，scope=='workspace'、storage=='internal'、rules 为 5 条非空字符串。用
+        python -c 从 spec.md 代码块 ast.literal_eval 提取英文原文逐字符比对，5 条全部一致（含 'Work
+        inside the current workspace only.' 至 'layered memory is assembled by
+        the runtime.'），未改写。
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: Scenario: 三层结构 WHEN 以含 task/todos/plan_summary 等键的 state 调用
+      `build_layered_memory(state)` THEN 返回 dict 恰含
+      `rules`、`working_memory`、`history_summary_store` 三键 AND `working_memory` 含
+      node/task/session_id/session_turn/plan_summary/todos/acceptance_criteria/\
+      verification_commands/research_notes/sources/agent_handoffs/code_agent_su\
+      mmary/verifier_summary/last_error/attempts/max_attempts 全部键 AND
+      `history_summary_store` 含
+      history_path/history_exists/history_summary/notepad_path/notepad_exists/n\
+      otepad/context_summary/compression_events 全部键。"
+    result: passed
+    reason:
+      text: python -c 断言 build_layered_memory({runtime:None}) 返回键集恰为 {rules,
+        working_memory, history_summary_store}；working_memory 恰 16
+        键（node/task/session_id/session_turn/plan_summary/todos/acceptance_criteria/verification_commands/research_notes/sources/agent_handoffs/code_agent_summary/verifier_summary/last_error/attempts/max_attempts）；history_summary_store
+        恰 8
+        键（history_path/history_exists/history_summary/notepad_path/notepad_exists/notepad/context_summary/compression_events）。tests/test_memory.py:61-96
+        同样断言。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: 'A3: Scenario: 文件读取 WHEN workspace 存在 NOTEPAD.md 与 HISTORY_SUMMARY.md THEN
+      `read_notepad`/`read_history_summary` 返回 `exists=True` 与文件全文 AND WHEN
+      workspace 不存在这两个文件 THEN 返回 `exists=False`、`content=""` 且不抛异常。'
+    result: passed
+    reason:
+      text: "memory.py:59-78 经 Path.read_text(utf-8) 读取，缺失返回 {'exists': False,
+        'content': ''} 不抛异常，非 UTF-8/IO 错误经 except (OSError, UnicodeDecodeError)
+        兜底。uv run pytest -k 'read or notepad...' 9 passed：存在返回
+        exists=True+全文、缺失目录/None runtime/非 UTF-8 均容错。"
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A4: Scenario: 截断辅助 WHEN 以超长文本调用 `_short_text(text, limit)` THEN 返回长度不超过
+      limit 且以 "..." 结尾 AND 短文本原样返回。'
+    result: passed
+    reason:
+      text: memory.py:81-88 _short_text：len<=limit 原样返回；超长返回
+        value[:limit-3]+'...'（总长恰为 limit，验证 'x'*50/10 -> 'xxxxxxx...'）；limit<=3
+        有防御分支。python -c 断言与 tests/test_memory.py:172-182 一致通过。
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: 'A5: Scenario: handoffs 修剪 WHEN `agent_handoffs` 超过 6 条 THEN
+      `working_memory["agent_handoffs"]` 恰保留最近 6 条且顺序保持。'
+    result: passed
+    reason:
+      text: memory.py:91-95 _trim_handoffs 用 list 切片 [-6:]，保留末尾 6 条且顺序保持（9 条输入得
+        [3,4,5,6,7,8]，测试 8 条得 [2..7]），非 list 返回 []。
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: 'A6: Scenario: sources 收敛 WHEN `sources` 含 title/url/content/score THEN
+      `working_memory["sources"]` 每项仅含 `title` 与 `url` 键。'
+    result: passed
+    reason:
+      text: memory.py:98-111 _norm_sources 每项仅保留 title/url（缺失补 ''），含 content/score
+        的输入验证输出恰为 [{'title','url'}]，非 list 返回 []。tests/test_memory.py:112-135
+        断言通过。
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: "A7: Scenario: 压缩历史层 WHEN state 含 `context_summary` 与
+      `compression_events`（>3 条） THEN `history_summary_store` 反映该
+      context_summary（≤1600 截断）AND `compression_events` 仅保留最近 3 条。"
+    result: passed
+    reason:
+      text: memory.py:154-159 context_summary 经 _short_text(...,1600)（9999 字输入验证输出长恰
+        1600 且以 '...' 结尾）；compression_events 取列表副本 [-3:]，5 条输入验证保留 [n2,n3,n4]
+        且顺序保持。
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: "A8: Scenario: prompt 格式化 WHEN 调用
+      `format_layered_memory_for_prompt(memory)` THEN 返回合法 JSON 字符串且
+      `json.loads` 后与输入相等。"
+    result: passed
+    reason:
+      text: memory.py:169-171 format_layered_memory_for_prompt 为 json.dumps(memory,
+        ensure_ascii=False)；python -c 与 tests/test_memory.py 验证返回 str、json.loads
+        后与输入完全相等（含中文内容不被转义）。
+      truncated: false
+  - id: A9
+    source: brief.md
+    text: "A9: Scenario: 状态 schema WHEN 检查 `NovGraphState.__annotations__` THEN 包含
+      context_summary/context_token_count/context_token_limit/context_should_co\
+      mpress/context_next_node/compression_events/memory_snapshot/history_summa\
+      ry 八个新字段。"
+    result: passed
+    reason:
+      text: state.py:67-74 新增 8 字段，python -c 验证 NovGraphState.__annotations__
+        全部包含且类型正确（str/int/bool/list[CompressionEvent]/LayeredMemory）。无循环导入：memory.py
+        仅导入 novagent.core.state，全仓 grep 确认 graph.memory 唯一外部导入方为 state.py:9。
+      truncated: false
+  - id: A10
+    source: brief.md
+    text: "A10: Scenario: 现有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且无新依赖、lock 一致 AND
+      `uv run pytest` 全部通过（离线）。"
+    result: passed
+    reason:
+      text: 独立复跑 uv run pytest -q -> 107 passed in 6.59s（离线）。git status/diff 确认
+        pyproject.toml 与 uv.lock 未修改（uv sync 后 lock
+        一致、无新依赖）；nodes.py/workflow.py/agents/code_agent.py
+        均未改动，code_agent.build_memory_snapshot 保持原空桩返回（符合 spec 与 D7 不接线要求）。
+      truncated: false
+builder_handoff:
+  candidate_id: 02127cd5-af80-4845-924c-bcad4eab59e1
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:757f6d8e-05cf-4f2d-844d-f2d583fe97dc
+  iteration: 1
+  summary:
+    text: '实现三层 Memory 系统（Context Engineering 数据层）：新增
+      src/novagent/graph/memory.py——RULES_LAYER
+      常量（scope=workspace、storage=internal、5
+      条规则逐字采用用户给定原文）、read_notepad/read_history_summary 只读辅助（读 workspace 根下
+      NOTEPAD.md/HISTORY_SUMMARY.md，缺失或读取失败含非 UTF-8 解码失败一律返回 {exists: False,
+      content: ""} 不抛异常）、_short_text（超长截断至总长≤limit 且以 ... 结尾）/ _trim_handoffs（最近
+      6 条）/ _norm_sources（仅 title/url）、build_layered_memory(state, *,
+      node="graph") 组装 rules + working_memory（16 键）+ history_summary_store（8 键，含
+      context_summary 截断与 compression_events 最近 3
+      条）、format_layered_memory_for_prompt（json.dumps
+      ensure_ascii=False）、CompressionEvent/LayeredMemory
+      TypedDict。src/novagent/graph/state.py 新增 8
+      个字段（context_summary、context_token_count、context_token_limit、context_should_compress、context_next_node、compression_events、memory_snapshot、history_summary）并从
+      graph.memory 导入类型（无循环导入）。tests/test_memory.py 新增 13 个离线测试（含空 state 容错、无
+      runtime 容错、非 UTF-8 文件容错、七个具名截断上限端到端断言、JSON 往返、不修改
+      state）；tests/test_graph_state.py 字段清单与类型断言同步更新并新增
+      CompressionEvent/LayeredMemory 注解测试。本轮处理验收项 A1-A10 全部。开发期检查：uv
+      sync（无新依赖、lock 一致）、uv run pytest（107 passed，离线）、uv run novagent --help（退出码
+      0）。已知限制：context_* 与 compression_events/history_summary 状态字段为本 change 预留
+      schema，无图内写入方（压缩执行逻辑属后续 change）；_short_text 在 limit<=3 的退化边界不保证以 ...
+      结尾（规格公式自身无法同时满足两约束，实际最小 limit 为 1000，不构成实际风险）。'
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+  checks:
+    - name:
+        text: uv sync（无新依赖、uv.lock 一致）
+        truncated: false
+      result: passed
+      note:
+        text: Resolved 60 packages, audited 57, 无安装变更
+        truncated: false
+    - name:
+        text: uv run pytest（离线全量）
+        truncated: false
+      result: passed
+      note:
+        text: 107 passed（105 既有 + 新增 test_memory.py 13 项中的 12 项与 test_graph_state.py
+          更新后净增 2 项）
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，现有 CLI 行为不受影响
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: context_*/compression_events/memory_snapshot/history_summary 状态字段为压缩机制预留
+        schema，本 change 无图内写入方
+      truncated: false
+    - text: _short_text 在 limit<=3 的退化边界不保证以省略号结尾（实际最小 limit 为 1000，无实际影响）
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核（两轮）确认：RULES_LAYER 5
+        条规则与规格逐字一致（程序化逐字符比对）；三层键集（3/16/8）、七个截断上限、handoffs 6 条、compression_events
+        3 条、sources 收敛均符合规格；schema 8
+        字段与类型导入无循环导入；范围无越界（nodes.py/workflow.py/code_agent.py/pyproject.toml/uv.lock
+        未改动）；首轮复核发现非 UTF-8 读取异常上抛的规格偏差，Builder 已修复（except (OSError,
+        UnicodeDecodeError)）并补具名上限端到端与非 UTF-8 容错测试，复查确认闭环；uv run pytest 107
+        passed、novagent --help 退出码 0。
+      truncated: false
+    reviewer_execution_ref: agent_9e8c658b-ecf7-47e5-89c7-0f7f1f00861e
+  submitted_at: 2026-09-10T22:55:40.712Z
+blockers: []
+verification:
+  candidate_id: 02127cd5-af80-4845-924c-bcad4eab59e1
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:55353c0e-7600-4414-9bcb-49d64ea6496f
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: check-uv-sync
+      name:
+        text: uv sync（无新依赖、uv.lock 一致）
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 99
+    - id: check-pytest-full
+      name:
+        text: uv run pytest -q（离线全量测试）
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8798
+    - id: check-cli-help
+      name:
+        text: uv run novagent --help（CLI 冒烟）
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 3241
+  summary:
+    text: 独立验收通过：A1 规则与 spec.md 原文逐字符一致；A2 三层键集 3/16/8 精确匹配；A3 四种读取情形容错正确；A4-A8
+      截断/修剪/收敛/round-trip 语义全部符合；A9 八字段 schema 到位且无循环导入；A10 pytest 107 passed
+      独立复跑确认、依赖与 lock 零变化、无越界改动（nodes/workflow/code_agent/pyproject/uv.lock
+      均未修改）。纯函数不变量（无模型/网络/写文件/不改 state）与缺失键容错均经代码审读与测试双重验证。Builder 摘要与独立观察一致。
+    truncated: false
+  risks:
+    - text: 低风险（不阻塞）：_short_text 在 limit<=3 的退化输入下返回可能短于 3 字符的省略号前缀（如 limit=1 时
+        '.'），spec 未定义该边界，验收示例不涉及。
+      truncated: false
+    - text: 低风险（不阻塞）：实现用 state.get('max_attempts') or 3，若状态显式设 max_attempts=0 会归一为 3，与
+        spec 字面 state.get('max_attempts', 3) 在该退化值上有细微差异；无验收项覆盖且语义上
+        max_attempts=0 无意义。
+      truncated: false
+    - text: 提示：build_layered_memory/rules 目前无运行时写入方与调用方（nodes/workflow 未接线），属 brief
+        D6/D7 明确预期的后续 change 范围。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-10T23:04:04.771Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 独立验收通过：A1 规则与 spec.md 原文逐字符一致；A2 三层键集 3/16/8 精确匹配；A3 四种读取情形容错正确；A4-A8
+        截断/修剪/收敛/round-trip 语义全部符合；A9 八字段 schema 到位且无循环导入；A10 pytest 107 passed
+        独立复跑确认、依赖与 lock 零变化、无越界改动（nodes/workflow/code_agent/pyproject/uv.lock
+        均未修改）。纯函数不变量（无模型/网络/写文件/不改 state）与缺失键容错均经代码审读与测试双重验证。Builder 摘要与独立观察一致。
+      truncated: false
+    completed_at: 2026-09-10T23:04:04.771Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T22:27:35.958Z
