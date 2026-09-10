@@ -1,0 +1,332 @@
+schema: comet.native.v4
+name: code-agent
+language: zh-CN
+phase: archive
+status: done
+state_version: 12
+brief: brief.md
+shape_confirmation_hash: 816af33d1346c690aa6640c922b34eab10a608972977ec830b88b0d2408af7d0
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/code-agent
+  target_branch: main
+  finish: merge
+loop:
+  stage: done
+  goal_cycle: 2
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: 工具绑定 WHEN 以含 `runtime`（指向临时 workspace）的 state 注入 FakeModel
+      调用 `run_code_agent` THEN FakeModel 绑定的工具名序列恰为 `["read_file", "write_file",
+      "edit_file", "grep", "bash", "todo_update"]`。'
+    result: passed
+    reason:
+      text: code_agent.py:104 绑定 build_tools(5 个，registry 顺序
+        read_file/write_file/edit_file/grep/bash) + todo_update，测试断言绑定名序列恰为 6
+        个且顺序一致
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: Scenario: 消息构造 WHEN 调用 `run_code_agent`（state 含 task 与
+      session_context）THEN 发给模型的首条消息为 SystemMessage 且内容即 `CODE_AGENT_PROMPT` AND
+      第二条 HumanMessage 同时包含 task、instruction、session_context 文本与 memory 快照段 AND
+      快照与 session 缺失时包含占位标注。"
+    result: passed
+    reason:
+      text: 首条 SystemMessage 内容即 CODE_AGENT_PROMPT，HumanMessage 含
+        task/instruction/session_context/memory 段，(no session context) 与 (no
+        memory snapshot) 占位均有测试覆盖
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: Scenario: ReAct 循环与返回结构 WHEN 注入 FakeModel（write_file 写文件 →
+      `todo_update` 置 in_progress → `todo_update` 置 completed → 纯文本结束）与收集型
+      writer THEN 返回 `ok is True` AND `summary` 为最后 AI 文本 AND `todos` 中对应 todo
+      状态经 pending→in_progress→completed AND workspace 出现写入文件 AND `messages`
+      类型序列以 AIMessage 开始、含 ToolMessage（内容为合法 JSON）、以 AIMessage 结束 AND
+      `tool_events` 类型序列为
+      `ai_message`、`tool_call`、`tool_result`（每工具一对）、`ai_message`、`final_answer`
+      AND writer 收到同一批事件。"
+    result: passed
+    reason:
+      text: write_file→in_progress→completed→纯文本场景下 ok/summary/todos 终态/文件落盘/messages
+        类型序列（含合法 JSON ToolMessage）/事件序列（每轮先 ai_message、每工具一对
+        tool_call+tool_result、末尾 final_answer）/writer 同批事件全部断言通过；todo 实时合并逻辑与
+        actor_node 逐字一致，中间态由调用顺序与代码路径等价保证
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: Scenario: todo 状态迁移边界 WHEN FakeModel 调用 `todo_update` 将某 todo 置
+      `blocked`（含 note）THEN 返回 `todos` 对应项 status 为 `blocked` 且 note 已更新 AND
+      WHEN 调用未知 `todo_id` THEN `todos` 保持不变且不报错。"
+    result: passed
+    reason:
+      text: blocked+note 更新生效、未知 todo_id 时 todos 不变且不报错，_VALID_STATUS 白名单与 note 逻辑与
+        graph/nodes.py 的 actor_node 完全一致
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Scenario: 循环边界 WHEN FakeModel 第一轮即纯文本 THEN 模型只被调用 1 次（提前结束）AND WHEN
+      FakeModel 每轮都返回 tool_call 且 `max_loops=2` THEN 模型恰被调用 2 次后返回。"
+    result: passed
+    reason:
+      text: 第一轮纯文本仅 1 次模型调用提前结束；max_loops=2 配 5 个 tool_call 响应恰调用 2 次后返回，两个方向均有测试
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "A6: Scenario: runtime 缺失 WHEN 以不含 `runtime` 的 state 调用 `run_code_agent`
+      THEN 抛出 `ValueError`。"
+    result: passed
+    reason:
+      text: state 无 runtime 时抛 ValueError（message 含 runtime），测试 pytest.raises 匹配，与
+        actor_node 一致
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: "A7: Scenario: 未知工具降级 WHEN FakeModel 调用未绑定的 `notepad_append` THEN 该调用结果文本以
+      `Error: unknown tool` 开头并作为 ToolMessage 回传 AND 循环继续不中断。"
+    result: passed
+    reason:
+      text: "notepad_append 未绑定，结果文本以 Error: unknown tool 开头（格式化与
+        graph.nodes._execute_tool 逐字相同）经 ToolMessage 回传，模型被调用 2 次证明循环继续"
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: 'A8: Scenario: 提示词常量 WHEN 导入 `novagent.agents.code_agent` THEN
+      `CODE_AGENT_PROMPT` 以 "You are codeAgent, a focused implementation
+      specialist." 开头 AND 含 "TodoUpdateTool"、"NotepadAppendTool"、"BashTool" AND
+      以 "End with a concise summary of files changed and checks run." 结尾。'
+    result: passed
+    reason:
+      text: CODE_AGENT_PROMPT 与 spec.md agents.code_agent 节用户原文 20
+        行逐行逐字一致（含换行位置、两空格续行、引号与撇号，两侧无行尾空白），仅末尾多一个换行符属豁免范围，开头/结尾句与三个工具名提及均符合
+      truncated: false
+  - id: A9
+    source: brief.md
+    text: "A9: Scenario: memory 接口预留 WHEN 调用 `build_memory_snapshot(state)` THEN
+      返回空字符串 AND 全程不发起模型调用或网络请求。"
+    result: passed
+    reason:
+      text: build_memory_snapshot 恒返回空字符串，函数体无模型调用/网络/副作用，测试对两种 state 断言为空
+      truncated: false
+  - id: A10
+    source: brief.md
+    text: "A10: Scenario: 现有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且无新依赖、lock 一致 AND
+      `uv run pytest` 全部通过（离线）AND `uv run novagent --help` 退出码 0。"
+    result: passed
+    reason:
+      text: Runtime 登记的 uv sync/uv lock --check/pytest(79 passed)/novagent --help
+        全部通过，且 git diff 028fcd6..HEAD --stat 显示本 change 仅新增 3
+        个源码/测试文件，pyproject.toml 与 uv.lock 未被修改
+      truncated: false
+builder_handoff:
+  candidate_id: af7d0ae4-b07d-49d9-864b-21a2c96bcd79
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:a3af3ac5-ad70-4f1b-841b-502a4f7ff857
+  iteration: 1
+  summary:
+    text: "实现 code-agent 候选：新增 src/novagent/agents/__init__.py 与
+      src/novagent/agents/code_agent.py——CODE_AGENT_PROMPT
+      逐字用户给定原文；build_memory_snapshot(state) layered memory
+      预留接口（恒返回空字符串，无副作用）；run_code_agent(state, instruction, *, writer=None,
+      max_loops=10, model=None)：从 state['runtime'] 取 RuntimeState（缺失抛
+      ValueError），bind_tools(build_tools(runtime)+[create_todo_update_tool()]) 恰
+      6 工具，消息为
+      SystemMessage(CODE_AGENT_PROMPT)+HumanMessage(task+instruction+session_co\
+      ntext(缺失占位)+memory 快照(空占位))，手写 ReAct 循环（每轮先发 ai_message；无 tool_calls
+      提前结束；max_loops 上限），_execute_tool 与 graph.nodes 同语义（未知工具 'Error: unknown
+      tool <name>'，异常 'Error: <异常>'，ToolMessage=json.dumps(result)），todo_update
+      按 todo_id 合并（status 限四值、note 真值更新、未知 id 忽略，与 actor_node 一致），事件
+      ai_message/tool_call/tool_result/final_answer 同时收集进 tool_events 并写
+      writer，返回 {ok:True, summary, todos, messages, tool_events}。新增
+      tests/test_code_agent.py 10 个离线用例（FakeModel+临时
+      workspace）。无新增依赖、pyproject/uv.lock 零改动，实现已提交（feat 提交）。"
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+  checks:
+    - name:
+        text: uv sync（worktree）
+        truncated: false
+      result: passed
+      note:
+        text: 成功；pyproject.toml 与 uv.lock 相对基线 028fcd6 零改动（无新依赖）
+        truncated: false
+    - name:
+        text: uv run pytest -q
+        truncated: false
+      result: passed
+      note:
+        text: 79 passed（含新增 10 个用例），离线运行
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，现有 CLI 行为不受影响
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: todo_update 的 todos 合并发生在 tool_result 事件发出之前（nodes.py 在其后）；合并不产生事件、不改变
+        result 文本，对外不可观察
+      truncated: false
+    - text: _execute_tool 用 call.get('args') or {} 而 nodes.py 用 call['args']：对缺 args
+        键的畸形 tool_call 更稳，语义等价
+      truncated: false
+    - text: notepad 工具未实现未绑定（非目标）：提示词按用户原文保留提及，模型幻觉调用走未知工具分支优雅降级，待后续 memory 阶段
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核执行逐条核对 A1-A10 全部 covered：CODE_AGENT_PROMPT 与原文逐字节 diff 一致；工具绑定序列恰 6
+        个且顺序一致；事件每轮先 ai_message、11 事件序列与 spec 一致；todo 迁移/blocked/未知 id 与
+        actor_node 逐字同语义；runtime 缺失抛错；未知工具降级不中断循环；build_memory_snapshot
+        恒空无副作用；git diff 028fcd6..HEAD 仅 3
+        个新文件（registry/graph/CLI/pyproject/uv.lock 零改动）。实测 pytest 79
+        passed、novagent --help 退出码 0。2 条低危观察均不阻塞。
+      truncated: false
+    reviewer_execution_ref: review-agent_d2cd9565-9f64-4bab-aff3-b1e0ff997488
+  submitted_at: 2026-09-10T17:07:46.074Z
+blockers: []
+verification:
+  candidate_id: af7d0ae4-b07d-49d9-864b-21a2c96bcd79
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:4696d044-2465-4e5a-8dad-961bc11b3037
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync 依赖安装
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 87
+    - id: uv-lock-check
+      name:
+        text: uv lock --check 锁一致
+        truncated: false
+      argv_display:
+        - text: lock
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 59
+    - id: pytest-suite
+      name:
+        text: uv run pytest 全量离线测试
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8292
+    - id: cli-help
+      name:
+        text: uv run novagent --help 退出码 0
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2738
+  summary:
+    text: 10 项验收全部通过：实现与测试真实覆盖 A1–A9 各场景，CODE_AGENT_PROMPT 经逐行比对与用户原文逐字一致，A10
+      的依赖/CLI 检查由 Runtime 全部通过且 git diff 证实 pyproject/uv.lock 未改动。无 failed、无
+      blocked，总判定 pass。
+    truncated: false
+  risks:
+    - text: A3 的 pending→in_progress 中间态未被测试单独快照（仅断言终态 completed），实时迁移由 tool_call 顺序与
+        _apply_todo_update 逐调用合并的代码路径保证，属等价覆盖
+      truncated: false
+    - text: note 以空字符串提供时不更新（if args.get('note') 真值判断），与 actor_node 同语义且规格注明与
+        actor_node 一致，对空串覆盖旧 note 的极端场景行为未定义
+      truncated: false
+    - text: docs/comet/changes/ 目录当前为 git 未跟踪状态，不影响依赖与行为，change 文档将在归档事务中由 Runtime 处理
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-10T17:12:49.214Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native Shape artifacts changed
+      truncated: false
+    completed_at: 2026-09-10T17:00:32.178Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 10 项验收全部通过：实现与测试真实覆盖 A1–A9 各场景，CODE_AGENT_PROMPT 经逐行比对与用户原文逐字一致，A10
+        的依赖/CLI 检查由 Runtime 全部通过且 git diff 证实 pyproject/uv.lock 未改动。无 failed、无
+        blocked，总判定 pass。
+      truncated: false
+    completed_at: 2026-09-10T17:12:49.214Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T16:35:14.543Z
