@@ -2,8 +2,7 @@
 
 节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通
 dict 更新。事件不通过生成器产出（LangGraph 节点不能 yield），而是经
-``on_event`` 回调即时发出，事件 schema 与 ``core.agent.stream_agent_events``
-完全一致。
+``on_event`` 回调即时发出，事件 schema 与统一事件流一致。
 """
 
 import json
@@ -12,7 +11,6 @@ from typing import Callable, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from novagent.core.agent import _execute_tool
 from novagent.core.state import RuntimeState
 from novagent.prompts.stage2 import ACTOR_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
 from novagent.providers.openai_provider import create_model
@@ -24,6 +22,17 @@ DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
 
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
+
+
+def _execute_tool(tool_map: dict, call: dict) -> str:
+    """执行单个 tool_call；未知工具与异常都转为错误文本回传模型。"""
+    tool = tool_map.get(call["name"])
+    if tool is None:
+        return f"Error: unknown tool {call['name']!r}"
+    try:
+        return str(tool.invoke(call["args"]))
+    except Exception as exc:  # noqa: BLE001 - 错误需回传给模型
+        return f"Error: {exc}"
 
 
 def _format_failed_verification(result: dict) -> str:

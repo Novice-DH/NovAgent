@@ -1,22 +1,24 @@
-"""core.agent ReAct 循环的离线行为（FakeModel，不发起网络请求）。"""
+"""core.agent 工作流事件流的离线行为（FakeModel，不发起网络请求）。"""
 
 import json
+import sys
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
-from novagent.core.agent import ACTOR_PROMPT, stream_agent_events
+from novagent.core.agent import stream_agent_events
+from novagent.core.state import RuntimeState
 
 
 class FakeModel:
-    """按序返回预设响应并记录收到的消息。"""
+    """按序返回预设响应并记录调用与绑定工具。"""
 
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
-        self.bound_tools = None
+        self.bindings = []
 
     def bind_tools(self, tools):
-        self.bound_tools = tools
+        self.bindings.append([tool.name for tool in tools])
         return self
 
     def invoke(self, messages):
@@ -28,102 +30,172 @@ def _tool_call(name, args, call_id):
     return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
 
 
-def test_emits_full_event_sequence_and_writes_file(workspace):
+def _plan_args(commands):
+    return {
+        "plan_summary": "plan",
+        "todos": [{"id": "t1", "content": "step"}],
+        "acceptance_criteria": ["result exists"],
+        "verification_commands": commands,
+    }
+
+
+PASS_JSON = json.dumps(
+    {
+        "passed": True,
+        "reason": "all good",
+        "checks": [],
+        "recommended_next_instruction": "",
+    }
+)
+FAIL_JSON = json.dumps(
+    {
+        "passed": False,
+        "reason": "tests broke",
+        "checks": [],
+        "recommended_next_instruction": "fix",
+    }
+)
+
+
+def _collect_events(workspace, model, **kwargs):
+    return list(
+        stream_agent_events("demo task", workspace=workspace, model=model, **kwargs)
+    )
+
+
+def test_pass_path_emits_node_and_actor_events(workspace):
+    ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
     model = FakeModel(
         [
+            _tool_call("todo_write", _plan_args([ok_command]), "c1"),
             _tool_call(
-                "write_file",
-                {"file_path": "note.txt", "content": "hi"},
-                "call_1",
+                "write_file", {"file_path": "result.txt", "content": "done"}, "c2"
             ),
-            AIMessage(content="All done."),
+            AIMessage(content="All steps done."),
+            AIMessage(content=PASS_JSON),
         ]
     )
-    events = list(
-        stream_agent_events("create a note", workspace=workspace, model=model)
+
+    events = _collect_events(workspace, model)
+
+    types_and_nodes = [(event["type"], event.get("node")) for event in events]
+    assert ("node_output", "planner") in types_and_nodes
+    assert ("node_output", "verifier") in types_and_nodes
+    assert types_and_nodes[-1] == ("node_output", "final")
+    assert types_and_nodes.index(("node_output", "planner")) < types_and_nodes.index(
+        ("ai_message", "actor")
     )
-    assert [event["type"] for event in events] == [
+    actor_events = [event for event in events if event.get("node") == "actor"]
+    assert [event["type"] for event in actor_events] == [
         "ai_message",
         "tool_call",
         "tool_result",
         "ai_message",
         "final_answer",
     ]
-    assert events[1] == {
-        "type": "tool_call",
-        "name": "write_file",
-        "args": {"file_path": "note.txt", "content": "hi"},
-    }
-    assert events[-1] == {"type": "final_answer", "content": "All done."}
-    assert (workspace / "note.txt").read_text(encoding="utf-8") == "hi"
-    tool_message = model.calls[-1][-1]
-    assert isinstance(tool_message, ToolMessage)
-    assert tool_message.tool_call_id == "call_1"
-    assert tool_message.content == json.dumps(events[2]["result"])
 
-
-def test_builds_messages_from_actor_prompt(workspace):
-    model = FakeModel([AIMessage(content="done")])
-    list(stream_agent_events("do it", workspace=workspace, model=model))
-    system_message, human_message = model.calls[0]
-    assert isinstance(system_message, SystemMessage)
-    assert system_message.content == ACTOR_PROMPT
-    assert isinstance(human_message, HumanMessage)
-    assert human_message.content == "do it"
-    assert ACTOR_PROMPT.startswith(
-        "You are the actor node in novagent's ReAct workflow."
-    )
-    assert model.bound_tools is not None
-    assert [tool.name for tool in model.bound_tools] == [
-        "read_file",
-        "write_file",
-        "edit_file",
-        "grep",
-        "bash",
+    planner_event = events[0]
+    assert planner_event["type"] == "node_output"
+    assert planner_event["plan_summary"] == "plan"
+    assert planner_event["todos"] == [
+        {"id": "t1", "content": "step", "status": "pending", "note": ""}
     ]
+    assert ok_command in planner_event["verification_commands"]
+
+    verifier_event = next(
+        event for event in events if event["type"] == "node_output" and event["node"] == "verifier"
+    )
+    assert verifier_event["passed"] is True
+    assert verifier_event["reason"] == "all good"
+    (result,) = verifier_event["verification_results"]
+    assert result["ok"] is True and result["exit_code"] == 0
+
+    final_event = events[-1]
+    assert final_event["final_answer"].startswith("Task completed")
+
+    assert len(model.calls) == 4
+    assert (workspace / "result.txt").read_text(encoding="utf-8") == "done"
 
 
-def test_tool_error_is_fed_back_not_raised(workspace):
+def test_failure_loop_emits_two_planner_outputs(workspace):
+    bad_command = f'"{sys.executable}" -c "raise SystemExit(1)"'
+    ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
     model = FakeModel(
         [
-            _tool_call("read_file", {"file_path": "missing.txt"}, "call_x"),
-            AIMessage(content="Handled."),
+            _tool_call("todo_write", _plan_args([bad_command]), "c1"),
+            AIMessage(content="Tried the step."),
+            AIMessage(content=FAIL_JSON),
+            _tool_call("todo_write", _plan_args([ok_command]), "c2"),
+            AIMessage(content="Fixed."),
+            AIMessage(content=PASS_JSON),
         ]
     )
-    events = list(
-        stream_agent_events("read something", workspace=workspace, model=model)
+
+    events = _collect_events(workspace, model)
+
+    planner_events = [
+        event for event in events if event["type"] == "node_output" and event["node"] == "planner"
+    ]
+    assert len(planner_events) == 2
+    failed_verifier = next(
+        event
+        for event in events
+        if event["type"] == "node_output"
+        and event["node"] == "verifier"
+        and not event["passed"]
     )
-    tool_result = events[2]
-    assert tool_result["type"] == "tool_result"
-    assert tool_result["name"] == "read_file"
-    assert tool_result["result"].startswith("Error:")
-    tool_message = model.calls[-1][-1]
-    assert tool_message.content.startswith('"Error:')
-    assert json.loads(tool_message.content).startswith("Error:")
+    assert failed_verifier["reason"] == "tests broke"
+    (result,) = failed_verifier["verification_results"]
+    assert result["ok"] is False and result["exit_code"] == 1
+    final_event = events[-1]
+    assert final_event["final_answer"].startswith("Task completed")
+    assert len(model.calls) == 6
 
 
-def test_unknown_tool_name_is_reported(workspace):
+def test_exhausted_budget_goes_straight_to_final(workspace):
+    bad_command = f'"{sys.executable}" -c "raise SystemExit(1)"'
     model = FakeModel(
         [
-            _tool_call("no_such_tool", {}, "call_u"),
-            AIMessage(content="Ok."),
+            _tool_call("todo_write", _plan_args([bad_command]), "c1"),
+            AIMessage(content="Tried the step."),
+            AIMessage(content=FAIL_JSON),
         ]
     )
-    events = list(
-        stream_agent_events("whatever", workspace=workspace, model=model)
-    )
-    assert "unknown tool" in events[2]["result"]
-    assert events[-1] == {"type": "final_answer", "content": "Ok."}
-    assert "unknown tool" in json.loads(model.calls[-1][-1].content)
 
+    events = _collect_events(workspace, model, max_attempts=1)
 
-def test_stops_after_max_loops(workspace):
-    looping = _tool_call("no_such_tool", {}, "call_loop")
-    model = FakeModel([looping] * 3)
-    events = list(
-        stream_agent_events(
-            "loop forever", workspace=workspace, model=model, max_loops=3
-        )
+    planner_events = [
+        event for event in events if event["type"] == "node_output" and event["node"] == "planner"
+    ]
+    assert len(planner_events) == 1
+    verifier_event = next(
+        event for event in events if event["type"] == "node_output" and event["node"] == "verifier"
     )
+    assert verifier_event["passed"] is False
+    final_event = events[-1]
+    assert final_event["final_answer"].startswith("Task failed")
+    assert "tests broke" in final_event["final_answer"]
     assert len(model.calls) == 3
-    assert events[-1]["type"] == "final_answer"
+
+
+def test_events_carry_node_field_and_actor_tools_run_in_workspace(workspace):
+    ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
+    model = FakeModel(
+        [
+            _tool_call("todo_write", _plan_args([ok_command]), "c1"),
+            _tool_call("bash", {"command": "echo from-actor"}, "c2"),
+            AIMessage(content="done"),
+            AIMessage(content=PASS_JSON),
+        ]
+    )
+
+    events = _collect_events(workspace, model)
+
+    assert all("node" in event for event in events)
+    tool_events = [event for event in events if event["type"] == "tool_result"]
+    assert tool_events and "from-actor" in tool_events[0]["result"]
+    assert [binding[0] for binding in model.bindings] == [
+        "todo_write",
+        "read_file",
+        "read_file",
+    ]

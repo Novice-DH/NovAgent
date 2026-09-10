@@ -5,7 +5,6 @@ import sys
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from novagent.core.agent import ACTOR_PROMPT as STAGE1_ACTOR_PROMPT
 from novagent.core.state import RuntimeState
 from novagent.graph import nodes as graph_nodes
 from novagent.graph.nodes import final_node
@@ -164,10 +163,3 @@ def test_stage2_prompts_and_node_imports():
     assert graph_nodes.PLANNER_PROMPT is stage2.PLANNER_PROMPT
     assert graph_nodes.VERIFIER_PROMPT is stage2.VERIFIER_PROMPT
     assert graph_nodes.ACTOR_PROMPT is stage2.ACTOR_PROMPT
-
-
-def test_stage1_actor_prompt_unchanged():
-    assert STAGE1_ACTOR_PROMPT.startswith(
-        "You are the actor node in novagent's ReAct workflow."
-    )
-    assert STAGE1_ACTOR_PROMPT is not stage2.ACTOR_PROMPT
