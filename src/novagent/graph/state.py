@@ -6,6 +6,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 from novagent.core.state import RuntimeState
+from novagent.graph.memory import CompressionEvent, LayeredMemory
 
 
 class TodoItem(TypedDict):
@@ -63,3 +64,11 @@ class NovGraphState(TypedDict, total=False):
     last_actor_summary: str
     last_error: str
     verification_checks: list[VerificationCheck]
+    context_summary: str
+    context_token_count: int
+    context_token_limit: int
+    context_should_compress: bool
+    context_next_node: str
+    compression_events: list[CompressionEvent]
+    memory_snapshot: LayeredMemory
+    history_summary: str

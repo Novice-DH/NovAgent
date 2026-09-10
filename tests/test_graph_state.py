@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from novagent.core.state import RuntimeState
+from novagent.graph.memory import CompressionEvent, LayeredMemory
 from novagent.graph.state import (
     AgentHandoff,
     NovGraphState,
@@ -52,6 +53,27 @@ def test_agent_handoff_annotations():
     ]
 
 
+def test_compression_event_annotations():
+    assert CompressionEvent.__total__ is False
+    assert list(CompressionEvent.__annotations__) == [
+        "node",
+        "reason",
+        "token_count",
+        "token_limit",
+        "summary",
+        "created_at",
+    ]
+
+
+def test_layered_memory_annotations():
+    assert LayeredMemory.__total__ is False
+    assert list(LayeredMemory.__annotations__) == [
+        "rules",
+        "working_memory",
+        "history_summary_store",
+    ]
+
+
 def test_nov_graph_state_fields_and_total():
     assert NovGraphState.__total__ is False
     annotations = NovGraphState.__annotations__
@@ -75,6 +97,14 @@ def test_nov_graph_state_fields_and_total():
         "last_actor_summary",
         "last_error",
         "verification_checks",
+        "context_summary",
+        "context_token_count",
+        "context_token_limit",
+        "context_should_compress",
+        "context_next_node",
+        "compression_events",
+        "memory_snapshot",
+        "history_summary",
     ]
     assert annotations["task"] is str
     assert annotations["runtime"] is RuntimeState
@@ -97,6 +127,14 @@ def test_nov_graph_state_fields_and_total():
     assert annotations["last_actor_summary"] is str
     assert annotations["last_error"] is str
     assert typing.get_args(annotations["verification_checks"]) == (VerificationCheck,)
+    assert annotations["context_summary"] is str
+    assert annotations["context_token_count"] is int
+    assert annotations["context_token_limit"] is int
+    assert annotations["context_should_compress"] is bool
+    assert annotations["context_next_node"] is str
+    assert typing.get_args(annotations["compression_events"]) == (CompressionEvent,)
+    assert annotations["memory_snapshot"] is LayeredMemory
+    assert annotations["history_summary"] is str
 
 
 def test_messages_uses_add_messages_reducer():
