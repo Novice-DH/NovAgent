@@ -1,0 +1,278 @@
+schema: comet.native.v4
+name: workflow-cli
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+shape_confirmation_hash: b74cb3ede411d3ae1bca9537cac6ea44e6da42949fa522f34af9a462d01f1db7
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "A1: Scenario: 通过路径的事件序列 WHEN 注入 FakeModel（planner 调 `todo_write`
+      提交计划、验证命令 `\"<python>\" -c \"print('ok')\"`；actor 第一轮 `write_file`
+      写文件、第二轮纯文本；verifier 输出 `passed=true` JSON）并以临时 workspace 调用
+      `stream_agent_events(task, workspace=ws, model=fake)` 收集全部事件 THEN 事件依次包含
+      `node_output`+planner（含 plan_summary 与 todos）、`node=\"actor\"` 的
+      `ai_message`/`tool_call`/`tool_result`、`node_output`+verifier（passed 为
+      True）、`node_output`+final，且 `node_output`+final 的 `final_answer` 以 \"Task
+      completed\" 开头 AND FakeModel 共被调用 4 次 AND 文件落盘。"
+    result: passed
+    reason:
+      text: 探针实测事件序
+        [(node_output,planner),(ai_message,actor),(tool_call,actor),(tool_result,actor),(ai_message,actor),(final_answer,actor),(node_output,verifier),(node_output,final)]，verifier
+        passed=True，final_answer='Task completed in 1 attempt(s). all good'，调用 4
+        次，文件落盘内容正确
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: 'A2: Scenario: 失败回环产生两轮节点事件 WHEN FakeModel 依次为（planner 计划带必失败命令
+      `"<python>" -c "raise SystemExit(1)"`、actor 文本、verifier `passed=false`
+      reason "tests broke"、planner 修订计划带通过命令、actor 文本、verifier
+      `passed=true`）THEN 事件流恰好出现两次 `node_output`+planner AND 失败轮
+      `node_output`+verifier 的 `passed` 为 False 且 `reason == "tests broke"` AND
+      最终 `node_output`+final 的 `final_answer` 以 "Task completed" 开头 AND
+      FakeModel 共被调用 6 次。'
+    result: passed
+    reason:
+      text: 探针实测恰好 2 次 planner node_output；失败轮 verifier passed=False 且 reason=='tests
+        broke'（exit_code=1）；调用 6 次；最终 final_answer 以 Task completed 开头
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: 'A3: Scenario: max_attempts 预算耗尽直接收尾 WHEN FakeModel
+      提供一轮必失败计划（planner、actor、verifier `passed=false`）且
+      `stream_agent_events(..., max_attempts=1)` THEN 事件流只有一次
+      `node_output`+planner AND `node_output`+verifier 的 `passed` 为 False AND
+      `node_output`+final 的 `final_answer` 以 "Task failed" 开头 AND FakeModel 共被调用
+      3 次（不再回 planner）。'
+    result: passed
+    reason:
+      text: max_attempts=1 探针实测仅 1 次 planner node_output，verifier
+        passed=False，final_answer 以 'Task failed after 1 attempt(s).' 开头（含 tests
+        broke），调用 3 次未回环
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A4: Scenario: CLI 显示节点徽标与 --max-attempts WHEN 用统一事件格式的 fake 流（planner
+      node_output、actor ai_message/tool_call/tool_result、verifier node_output
+      passed=true、final node_output）monkeypatch 后以 CliRunner 运行 `run "demo task"
+      --workspace <ws> --max-attempts 2` THEN 退出码 0 AND 输出依次包含 "📋 Planner"、"🔧
+      Actor"、"✅ Verifier"、"📝 Final" 与工具详情、最终回答 AND fake 记录到的 `max_attempts ==
+      2` AND 不带选项运行时 fake 记录到 `max_attempts == 3` AND `--help` 包含
+      `--max-attempts`。'
+    result: passed
+    reason:
+      text: CliRunner 探针：退出码 0，📋/🔧/✅/📝 位置严格递增，工具详情 bash/echo hi/exit 0
+        齐全；--max-attempts 显式记录 [2]、缺省记录 [3]；--help 含 --max-attempts 且退出码 0
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Scenario: 现有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且 `uv.lock`
+      一致（无新依赖）AND `uv run pytest` 全部通过（离线）AND `uv run novagent --help` 退出码 0 AND
+      缺 `OPENAI_API_KEY` 时 CLI 仍以退出码 1 与清晰错误退出。"
+    result: passed
+    reason:
+      text: git diff 证实 tools/、graph/state.py、prompts/ 无改动；nodes.py 的 _execute_tool 与
+        HEAD 原 core.agent 实现逐行一致；独立复跑 uv lock --check OK、pytest 69
+        passed、novagent --help 退出 0，缺 OPENAI_API_KEY 时退出码 1 且报 Configuration
+        error 清晰信息
+      truncated: false
+builder_handoff:
+  candidate_id: eb6ffd29-7962-4a3a-bd7e-8860c35faa06
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:ddf39733-4eb5-455f-8be0-598ad94af34b
+  iteration: 1
+  summary:
+    text: 本轮把 core/agent.py 切换为 LangGraph 工作流驱动并升级 CLI：agent.py 的
+      stream_agent_events 新签名 (task, *, workspace, max_attempts=3,
+      model=None)，内部 build_workflow(model=model).stream(inputs,
+      stream_mode=['updates','custom'])；custom 事件补 node='actor'
+      实时转发（ai_message/tool_call/tool_result/final_answer），updates 解析为
+      node_output 事件（planner 含
+      plan_summary/todos/acceptance_criteria/verification_commands，verifier 含
+      passed/reason/verification_results/verification_checks，final 含
+      final_answer），actor 节点更新不重复产出；verifier 事件 reason 为结论原因（通过取
+      final_answer，失败取 last_error 末行），命令详情在 verification_results。旧手写循环与 stage1
+      ACTOR_PROMPT 删除，提示词统一用 prompts.stage2。workflow.py actor 注册改为图内包装
+      _actor，get_stream_writer() 作为 on_event 使内部事件进入 custom 流（invoke
+      下静默丢弃已探针验证；actor_node 接口不变）。nodes.py 的 _execute_tool
+      移入本地解开循环导入（逐字不变）。cli/app.py 新增 --max-attempts（默认 3，min=1）透传，_print_event
+      按统一事件渲染 📋 Planner（计划+todos）、🔧 Actor 标头+工具详情、✅/❌
+      Verifier（reason+每条命令退出码，超时显示 failed to run）、📝 Final；忽略 actor 内部
+      final_answer 与 node_output+actor；全部 escape 转义。tests/test_agent_loop.py
+      按统一事件语义重写（通过/回环/预算耗尽 4 测试），test_cli.py 重写（帮助/缺 key/徽标顺序/--max-attempts
+      传值与默认/❌ 分支 6 测试），test_graph_workflow.py 删除依赖已移除常量的用例。处理全部验收项
+      A1-A5。开发期检查：uv run pytest 69 passed（离线）、uv run novagent --help 退出码 0 且含
+      --max-attempts、uv lock --check 一致（无新依赖）。已知限制：verifier 超时命令在事件层
+      exit_code=None（CLI 显示 failed to run）。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+  checks:
+    - name:
+        text: uv run pytest
+        truncated: false
+      result: passed
+      note:
+        text: 69 passed，全部离线
+        truncated: false
+    - name:
+        text: uv lock --check
+        truncated: false
+      result: passed
+      note:
+        text: 无新依赖，锁一致
+        truncated: false
+    - name:
+        text: uv run novagent --help
+        truncated: false
+      result: passed
+      note:
+        text: 退出码 0，帮助含 --max-attempts
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: verifier 验证命令超时/无法执行时 exit_code=None，CLI 显示 'failed to run'
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核逐项确认 A1-A5 全部 ok：事件顺序、reason 提取与 brief 一致（splitlines 末行=结论原因）、预算耗尽直接
+        final、CLI 徽标顺序与 --max-attempts 传值/默认、缺 key 退出码 1；_execute_tool
+        与原实现逐字一致且循环导入解除；get_stream_writer 仅在图上下文调用，invoke 场景不受影响；改动仅限声明文件，Python
+        3.10 兼容。复核自写探针复现事件序列并复跑 pytest 69 passed。无阻断问题（一处 exit None 外观边角已由
+        Builder 修正）。
+      truncated: false
+    reviewer_execution_ref: agent_8a0f0b0a-58bd-4b92-ae02-3f12ccbf88b4
+  submitted_at: 2026-09-10T12:45:30.061Z
+blockers: []
+verification:
+  candidate_id: eb6ffd29-7962-4a3a-bd7e-8860c35faa06
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:099960b7-d68e-49ae-82f0-694fcfb4f960
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync 依赖安装
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 73
+    - id: uv-lock-check
+      name:
+        text: uv lock --check 锁一致
+        truncated: false
+      argv_display:
+        - text: lock
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 59
+    - id: pytest-suite
+      name:
+        text: uv run pytest 全量离线测试
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8132
+    - id: cli-help
+      name:
+        text: uv run novagent --help 含 --max-attempts
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: novagent
+          truncated: false
+        - text: --help
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2483
+  summary:
+    text: A1-A5 全部经独立探针复核通过：事件流语义、失败回环与预算耗尽、CLI 徽标渲染与 --max-attempts、范围外零改动均与
+      brief/spec 一致。
+    truncated: false
+  risks:
+    - text: verifier 命令超时（exit_code=None）时 CLI 显示 'failed to run' 而非具体退出码，属渲染降级非缺陷
+      truncated: false
+    - text: tests/test_graph_workflow.py 删除 stage1 ACTOR_PROMPT 旧测试，为 D5
+        移除常量的必要连带改动，节点语义测试未受影响
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-10T12:50:41.109Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: A1-A5 全部经独立探针复核通过：事件流语义、失败回环与预算耗尽、CLI 徽标渲染与 --max-attempts、范围外零改动均与
+        brief/spec 一致。
+      truncated: false
+    completed_at: 2026-09-10T12:50:41.109Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T12:27:57.487Z
