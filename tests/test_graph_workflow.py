@@ -9,7 +9,7 @@ from novagent.core.state import RuntimeState
 from novagent.graph import nodes as graph_nodes
 from novagent.graph.nodes import final_node
 from novagent.graph.workflow import build_workflow
-from novagent.prompts import stage2
+from novagent.prompts import stage2, stage3
 
 
 class FakeModel:
@@ -70,15 +70,13 @@ def _initial_state(workspace):
     }
 
 
-def test_builds_four_node_graph():
+def test_builds_three_node_graph():
     graph = build_workflow()
 
-    assert {"planner", "actor", "verifier", "final"} <= set(graph.nodes)
-    assert not (set(graph.nodes) - {"planner", "actor", "verifier", "final", "__start__"})
+    assert set(graph.nodes) == {"planner", "verifier", "final", "__start__"}
     edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
     assert ("__start__", "planner") in edges
-    assert ("planner", "actor") in edges
-    assert ("actor", "verifier") in edges
+    assert ("planner", "verifier") in edges
     assert ("final", "__end__") in edges
 
 
@@ -86,11 +84,21 @@ def test_end_to_end_passes_first_try(workspace):
     ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
     fake = FakeModel(
         [
+            # planner 轮 1：发布计划
             _tool_call("todo_write", _plan_args([ok_command]), "c1"),
+            # planner 轮 2：委托 codeAgent（受托内部：写文件 → 总结）
             _tool_call(
-                "write_file", {"file_path": "result.txt", "content": "done"}, "c2"
+                "call_code_agent",
+                {"instruction": "write the result file"},
+                "c2",
             ),
-            AIMessage(content="All steps done."),
+            _tool_call(
+                "write_file", {"file_path": "result.txt", "content": "done"}, "k1"
+            ),
+            AIMessage(content="Wrote result.txt."),
+            # planner 轮 3：supervisor 总结，纯文本结束
+            AIMessage(content="Plan executed, result written."),
+            # verifier
             AIMessage(content=PASS_JSON),
         ]
     )
@@ -103,13 +111,20 @@ def test_end_to_end_passes_first_try(workspace):
     assert "1" in final["final_answer"]
     assert "all good" in final["final_answer"]
     assert all(todo["status"] == "completed" for todo in final["todos"])
-    assert (workspace / "result.txt").read_text(encoding="utf-8") == "done"
-    assert len(fake.calls) == 4
-    assert [binding[0] for binding in fake.bindings] == [
-        "todo_write",
-        "read_file",
-        "read_file",
+    assert final["code_agent_summary"] == "Wrote result.txt."
+    assert final["agent_handoffs"] == [
+        {
+            "from_agent": "planner",
+            "to_agent": "codeAgent",
+            "instruction": "write the result file",
+            "result": "Wrote result.txt.",
+        }
     ]
+    assert (workspace / "result.txt").read_text(encoding="utf-8") == "done"
+    assert len(fake.calls) == 6
+    assert fake.bindings[0] == ["todo_write", "call_search_agent", "call_code_agent"]
+    assert fake.bindings[1][0] == "read_file"
+    assert fake.bindings[2] == ["read_file", "grep"]
 
 
 def test_end_to_end_retries_after_failure(workspace):
@@ -117,11 +132,13 @@ def test_end_to_end_retries_after_failure(workspace):
     ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
     fake = FakeModel(
         [
+            # 第一轮 planner：发布计划后直接结束
             _tool_call("todo_write", _plan_args([bad_command]), "c1"),
-            AIMessage(content="Tried the step."),
+            AIMessage(content="Plan ready."),
             AIMessage(content=FAIL_JSON),
+            # 第二轮 planner：修订计划后直接结束
             _tool_call("todo_write", _plan_args([ok_command]), "c2"),
-            AIMessage(content="Fixed."),
+            AIMessage(content="Revised plan."),
             AIMessage(content=PASS_JSON),
         ]
     )
@@ -150,16 +167,15 @@ def test_final_node_formats_success_and_failure():
     assert "passed" not in update
 
 
-def test_stage2_prompts_and_node_imports():
-    assert stage2.PLANNER_PROMPT
-    assert stage2.ACTOR_PROMPT
+def test_stage3_prompts_and_node_imports():
+    assert stage3.PLANNER_PROMPT.startswith(
+        "You are the planner/supervisor node in novagent stage 3."
+    )
+    assert "CallSearchAgentTool" in stage3.PLANNER_PROMPT
     assert stage2.VERIFIER_PROMPT
     assert stage2.FINAL_PROMPT
-    assert "todo_write" in stage2.PLANNER_PROMPT
-    assert stage2.ACTOR_PROMPT.startswith(
-        "You are the actor node in novagent's LangGraph workflow."
-    )
-    assert '"passed"' in stage2.VERIFIER_PROMPT
-    assert graph_nodes.PLANNER_PROMPT is stage2.PLANNER_PROMPT
+    assert not hasattr(stage2, "PLANNER_PROMPT")
+    assert not hasattr(stage2, "ACTOR_PROMPT")
+    assert graph_nodes.PLANNER_PROMPT is stage3.PLANNER_PROMPT
     assert graph_nodes.VERIFIER_PROMPT is stage2.VERIFIER_PROMPT
-    assert graph_nodes.ACTOR_PROMPT is stage2.ACTOR_PROMPT
+    assert not hasattr(graph_nodes, "actor_node")

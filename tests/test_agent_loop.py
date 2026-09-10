@@ -63,15 +63,25 @@ def _collect_events(workspace, model, **kwargs):
     )
 
 
-def test_pass_path_emits_node_and_actor_events(workspace):
+def test_pass_path_emits_planner_coordination_events(workspace):
     ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
     model = FakeModel(
         [
+            # planner 轮 1：发布计划
             _tool_call("todo_write", _plan_args([ok_command]), "c1"),
+            # planner 轮 2：委托 codeAgent（受托内部：写文件 → 总结）
             _tool_call(
-                "write_file", {"file_path": "result.txt", "content": "done"}, "c2"
+                "call_code_agent",
+                {"instruction": "write the result file"},
+                "c2",
             ),
-            AIMessage(content="All steps done."),
+            _tool_call(
+                "write_file", {"file_path": "result.txt", "content": "done"}, "k1"
+            ),
+            AIMessage(content="Wrote result.txt."),
+            # planner 轮 3：supervisor 总结
+            AIMessage(content="Plan executed, result written."),
+            # verifier
             AIMessage(content=PASS_JSON),
         ]
     )
@@ -82,20 +92,25 @@ def test_pass_path_emits_node_and_actor_events(workspace):
     assert ("node_output", "planner") in types_and_nodes
     assert ("node_output", "verifier") in types_and_nodes
     assert types_and_nodes[-1] == ("node_output", "final")
-    assert types_and_nodes.index(("node_output", "planner")) < types_and_nodes.index(
-        ("ai_message", "actor")
+    # planner 内部事件带 node="planner"，在 planner 节点执行期间流出，
+    # 因此先于 planner 完成时才产生的 node_output 事件
+    assert types_and_nodes.index(("ai_message", "planner")) < types_and_nodes.index(
+        ("node_output", "planner")
     )
-    actor_events = [event for event in events if event.get("node") == "actor"]
-    assert [event["type"] for event in actor_events] == [
-        "ai_message",
-        "tool_call",
-        "tool_result",
-        "ai_message",
-        "final_answer",
-    ]
+    assert ("handoff", "planner") in types_and_nodes
+    planner_custom = [event for event in events if event.get("node") == "planner"]
+    assert [event["type"] for event in planner_custom][0] == "ai_message"
+    assert "handoff" in [event["type"] for event in planner_custom]
+    # 受托 codeAgent 的内部事件也经 planner writer 透传
+    assert ("tool_call", "planner") in types_and_nodes
+    assert any(
+        event.get("type") == "tool_call" and event.get("name") == "write_file"
+        for event in planner_custom
+    )
 
-    planner_event = events[0]
-    assert planner_event["type"] == "node_output"
+    planner_event = next(
+        event for event in events if event["type"] == "node_output" and event["node"] == "planner"
+    )
     assert planner_event["plan_summary"] == "plan"
     assert planner_event["todos"] == [
         {"id": "t1", "content": "step", "status": "pending", "note": ""}
@@ -113,7 +128,7 @@ def test_pass_path_emits_node_and_actor_events(workspace):
     final_event = events[-1]
     assert final_event["final_answer"].startswith("Task completed")
 
-    assert len(model.calls) == 4
+    assert len(model.calls) == 6
     assert (workspace / "result.txt").read_text(encoding="utf-8") == "done"
 
 
@@ -123,10 +138,10 @@ def test_failure_loop_emits_two_planner_outputs(workspace):
     model = FakeModel(
         [
             _tool_call("todo_write", _plan_args([bad_command]), "c1"),
-            AIMessage(content="Tried the step."),
+            AIMessage(content="Plan ready."),
             AIMessage(content=FAIL_JSON),
             _tool_call("todo_write", _plan_args([ok_command]), "c2"),
-            AIMessage(content="Fixed."),
+            AIMessage(content="Revised plan."),
             AIMessage(content=PASS_JSON),
         ]
     )
@@ -157,7 +172,7 @@ def test_exhausted_budget_goes_straight_to_final(workspace):
     model = FakeModel(
         [
             _tool_call("todo_write", _plan_args([bad_command]), "c1"),
-            AIMessage(content="Tried the step."),
+            AIMessage(content="Plan ready."),
             AIMessage(content=FAIL_JSON),
         ]
     )
@@ -178,13 +193,19 @@ def test_exhausted_budget_goes_straight_to_final(workspace):
     assert len(model.calls) == 3
 
 
-def test_events_carry_node_field_and_actor_tools_run_in_workspace(workspace):
+def test_events_carry_node_field_and_delegated_tools_run_in_workspace(workspace):
     ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
     model = FakeModel(
         [
             _tool_call("todo_write", _plan_args([ok_command]), "c1"),
-            _tool_call("bash", {"command": "echo from-actor"}, "c2"),
-            AIMessage(content="done"),
+            _tool_call(
+                "call_code_agent",
+                {"instruction": "run a check"},
+                "c2",
+            ),
+            _tool_call("bash", {"command": "echo from-code-agent"}, "k1"),
+            AIMessage(content="check done"),
+            AIMessage(content="supervisor summary"),
             AIMessage(content=PASS_JSON),
         ]
     )
@@ -193,7 +214,7 @@ def test_events_carry_node_field_and_actor_tools_run_in_workspace(workspace):
 
     assert all("node" in event for event in events)
     tool_events = [event for event in events if event["type"] == "tool_result"]
-    assert tool_events and "from-actor" in tool_events[0]["result"]
+    assert tool_events and any("from-code-agent" in str(e["result"]) for e in tool_events)
     assert [binding[0] for binding in model.bindings] == [
         "todo_write",
         "read_file",

@@ -9,7 +9,9 @@ from langgraph.graph.message import add_messages
 
 from novagent.core.state import RuntimeState
 from novagent.graph.state import (
+    AgentHandoff,
     NovGraphState,
+    SourceItem,
     TodoItem,
     VerificationCheck,
     VerificationResult,
@@ -35,6 +37,21 @@ def test_verification_result_annotations():
     assert annotations["stderr"] is str
 
 
+def test_source_item_annotations():
+    assert SourceItem.__total__ is False
+    assert list(SourceItem.__annotations__) == ["url", "title", "content", "score"]
+
+
+def test_agent_handoff_annotations():
+    assert AgentHandoff.__total__ is False
+    assert list(AgentHandoff.__annotations__) == [
+        "from_agent",
+        "to_agent",
+        "instruction",
+        "result",
+    ]
+
+
 def test_nov_graph_state_fields_and_total():
     assert NovGraphState.__total__ is False
     annotations = NovGraphState.__annotations__
@@ -47,6 +64,10 @@ def test_nov_graph_state_fields_and_total():
         "acceptance_criteria",
         "verification_commands",
         "verification_results",
+        "research_notes",
+        "sources",
+        "agent_handoffs",
+        "code_agent_summary",
         "passed",
         "attempts",
         "max_attempts",
@@ -58,6 +79,8 @@ def test_nov_graph_state_fields_and_total():
     assert annotations["task"] is str
     assert annotations["runtime"] is RuntimeState
     assert annotations["plan_summary"] is str
+    assert annotations["research_notes"] is str
+    assert annotations["code_agent_summary"] is str
     assert typing.get_origin(annotations["todos"]) is list
     assert typing.get_args(annotations["todos"]) == (TodoItem,)
     assert typing.get_args(annotations["acceptance_criteria"]) == (str,)
@@ -65,6 +88,8 @@ def test_nov_graph_state_fields_and_total():
     assert typing.get_args(annotations["verification_results"]) == (
         VerificationResult,
     )
+    assert typing.get_args(annotations["sources"]) == (SourceItem,)
+    assert typing.get_args(annotations["agent_handoffs"]) == (AgentHandoff,)
     assert annotations["passed"] is bool
     assert annotations["attempts"] is int
     assert annotations["max_attempts"] is int

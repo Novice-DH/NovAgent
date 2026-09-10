@@ -1,8 +1,8 @@
-"""LangGraph 工作流节点：planner / actor / verifier 与条件路由。
+"""LangGraph 工作流节点：planner（supervisor）/ verifier 与条件路由。
 
 节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通
-dict 更新。事件不通过生成器产出（LangGraph 节点不能 yield），而是经
-``on_event`` 回调即时发出，事件 schema 与统一事件流一致。
+dict 更新。planner 的协调事件（含受托专家 Agent 的内部事件）经
+``on_event`` 即时发出，事件 schema 与统一事件流一致。
 """
 
 import json
@@ -10,13 +10,18 @@ from typing import Callable, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 
+from novagent.agents.code_agent import run_code_agent
+from novagent.agents.search_agent import run_search_agent
 from novagent.core.state import RuntimeState
-from novagent.prompts.stage2 import ACTOR_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
+from novagent.graph.state import AgentHandoff, SourceItem
+from novagent.prompts.stage2 import VERIFIER_PROMPT
+from novagent.prompts.stage3 import PLANNER_PROMPT
 from novagent.providers.openai_provider import create_model
 from novagent.tools.bash_tool import execute_command
-from novagent.tools.registry import build_read_only_tools, build_tools
-from novagent.tools.todo_tools import create_todo_update_tool, create_todo_write_tool
+from novagent.tools.registry import build_read_only_tools
+from novagent.tools.todo_tools import create_todo_write_tool
 
 DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
@@ -24,95 +29,9 @@ DEFAULT_MAX_ATTEMPTS = 3
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
 
 
-def _execute_tool(tool_map: dict, call: dict) -> str:
-    """执行单个 tool_call；未知工具与异常都转为错误文本回传模型。"""
-    tool = tool_map.get(call["name"])
-    if tool is None:
-        return f"Error: unknown tool {call['name']!r}"
-    try:
-        return str(tool.invoke(call["args"]))
-    except Exception as exc:  # noqa: BLE001 - 错误需回传给模型
-        return f"Error: {exc}"
-
-
 def _format_failed_verification(result: dict) -> str:
     detail = result.get("stderr", "") or "exit code {}".format(result.get("exit_code"))
     return f"- {result.get('command', '')}: {detail}"
-
-
-def _render_todos(todos) -> str:
-    if not todos:
-        return "(no todos yet)"
-    lines = []
-    for todo in todos:
-        lines.append(
-            f"- [{todo.get('id', '')}] {todo.get('content', '')}"
-            f" ({todo.get('status', 'pending')}) {todo.get('note', '')}".rstrip()
-        )
-    return "\n".join(lines)
-
-
-def _emit(on_event: Optional[Callable[[dict], None]], event: dict) -> None:
-    if on_event is not None:
-        on_event(event)
-
-
-def _response_text(response) -> str:
-    content = response.content
-    return content if isinstance(content, str) else str(content)
-
-
-def planner_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict:
-    """生成或修订计划；结构化输出经 ``todo_write`` 工具提交。"""
-    if model is None:
-        model = create_model()
-    agent = model.bind_tools([create_todo_write_tool()])
-
-    task = state.get("task", "")
-    last_error = state.get("last_error") or ""
-    if state.get("todos") and last_error:
-        failed = [
-            result
-            for result in state.get("verification_results") or []
-            if not result.get("ok")
-        ]
-        failed_lines = "\n".join(_format_failed_verification(r) for r in failed)
-        instruction = (
-            f"Task: {task}\n\n"
-            "The previous plan failed and must be revised.\n"
-            f"Last error: {last_error}\n"
-            f"Failed verifications:\n{failed_lines or '(none)'}\n\n"
-            "Submit a revised plan with the todo_write tool."
-        )
-    else:
-        instruction = f"Task: {task}\n\nCreate a plan and submit it with the todo_write tool."
-
-    messages = [
-        SystemMessage(content=PLANNER_PROMPT),
-        HumanMessage(content=instruction),
-    ]
-    response = agent.invoke(messages)
-    call = next(
-        (
-            c
-            for c in getattr(response, "tool_calls", None) or []
-            if c["name"] == "todo_write"
-        ),
-        None,
-    )
-    if call is None:
-        raise ValueError(
-            "planner_node: the model did not submit a plan via the todo_write tool"
-        )
-    args = call.get("args", {})
-    return {
-        "plan_summary": str(args.get("plan_summary", "")),
-        "todos": [_normalize_todo(raw) for raw in args.get("todos") or []],
-        "acceptance_criteria": [str(c) for c in args.get("acceptance_criteria") or []],
-        "verification_commands": [
-            str(c) for c in args.get("verification_commands") or []
-        ],
-    }
 
 
 def _normalize_todo(raw) -> dict:
@@ -127,79 +46,241 @@ def _normalize_todo(raw) -> dict:
     }
 
 
-def actor_node(
+def _response_text(response) -> str:
+    content = response.content
+    return content if isinstance(content, str) else str(content)
+
+
+def planner_node(
     state: dict,
     *,
     model: Optional[BaseChatModel] = None,
     on_event: Optional[Callable[[dict], None]] = None,
+    max_loops: int = DEFAULT_MAX_LOOPS,
 ) -> dict:
-    """运行 actor ReAct 循环；每个事件经 ``on_event`` 即时发出。"""
-    runtime = _require_runtime(state, "actor_node")
+    """运行 supervisor 协调循环；每个事件经 ``on_event`` 即时发出。
+
+    绑定三个工具：``todo_write`` 发布/修订计划、``call_search_agent``
+    委托搜索、``call_code_agent`` 委托实现。委托产物写回返回更新：
+    ``research_notes``/``sources``/``agent_handoffs``/``code_agent_summary``/
+    ``todos``/``messages``（以及发生 ``todo_write`` 时的计划四字段）。
+    """
     if model is None:
         model = create_model()
-    tools = build_tools(runtime) + [create_todo_update_tool()]
+
+    updates: dict = {}
+    handoffs: list[AgentHandoff] = []
+    research_notes = str(state.get("research_notes") or "")
+    sources: list[SourceItem] = list(state.get("sources") or [])
+    seen_urls = {str(item.get("url") or "") for item in sources}
+
+    def _writer(event: dict) -> None:
+        if on_event is not None:
+            on_event(event)
+
+    def _delegation_state() -> dict:
+        # 委托应看到本节点内已产生的更新（计划 todos、研究笔记），
+        # 保证同一轮内多次委托链式一致。
+        merged = dict(state)
+        if "todos" in updates:
+            merged["todos"] = updates["todos"]
+        merged["research_notes"] = research_notes
+        return merged
+
+    def _call_search_agent_tool(state, writer, instruction):
+        """委托 searchAgent 研究；更新 research_notes/sources/agent_handoffs。"""
+        nonlocal research_notes
+        writer(
+            {
+                "type": "handoff",
+                "from": "planner",
+                "to": "searchAgent",
+                "instruction": instruction,
+            }
+        )
+        result = run_search_agent(state, instruction, writer=writer, model=model)
+        summary = str(result.get("summary") or "")
+        research_notes = (
+            f"{research_notes}\n\n{summary}" if research_notes else summary
+        )
+        updates["research_notes"] = research_notes
+        new_items: list[SourceItem] = []
+        for event in result.get("tool_events") or []:
+            if event.get("type") != "search_results":
+                continue
+            payload = event.get("result") or {}
+            if not payload.get("ok"):
+                continue
+            for item in payload.get("results") or []:
+                url = str(item.get("url") or "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                new_items.append(
+                    {
+                        "url": url,
+                        "title": str(item.get("title") or ""),
+                        "content": str(item.get("content") or ""),
+                        "score": float(item.get("score") or 0.0),
+                    }
+                )
+        if new_items:
+            sources.extend(new_items)
+            updates["sources"] = sources
+        handoffs.append(
+            {
+                "from_agent": "planner",
+                "to_agent": "searchAgent",
+                "instruction": str(instruction),
+                "result": summary,
+            }
+        )
+        updates["agent_handoffs"] = handoffs
+        return {
+            "ok": True,
+            "summary": summary,
+            "queries": list(result.get("queries") or []),
+            "sources": list(result.get("sources") or []),
+        }
+
+    def _call_code_agent_tool(state, writer, instruction):
+        """委托 codeAgent 实现；更新 todos/code_agent_summary/agent_handoffs/messages。"""
+        writer(
+            {
+                "type": "handoff",
+                "from": "planner",
+                "to": "codeAgent",
+                "instruction": instruction,
+            }
+        )
+        result = run_code_agent(state, instruction, writer=writer, model=model)
+        summary = str(result.get("summary") or "")
+        updates["todos"] = list(result.get("todos") or [])
+        updates["code_agent_summary"] = summary
+        # 同一轮内多次代码委托时累加，保持 reducer 并入语义
+        updates["messages"] = (updates.get("messages") or []) + list(
+            result.get("messages") or []
+        )
+        handoffs.append(
+            {
+                "from_agent": "planner",
+                "to_agent": "codeAgent",
+                "instruction": str(instruction),
+                "result": summary,
+            }
+        )
+        updates["agent_handoffs"] = handoffs
+        return {"ok": True, "summary": summary}
+
+    def _call_search_agent(instruction: str) -> dict:
+        """Delegate web/document research to the searchAgent.
+
+        Args:
+            instruction: Research instruction for the search agent.
+
+        Returns:
+            A dict with ``ok``, the agent ``summary``, issued ``queries``
+            and ``sources`` (URLs).
+        """
+        return _call_search_agent_tool(_delegation_state(), _writer, instruction)
+
+    def _call_code_agent(instruction: str) -> dict:
+        """Delegate file/code implementation to the codeAgent.
+
+        Args:
+            instruction: Implementation instruction for the code agent.
+
+        Returns:
+            A dict with ``ok`` and the agent ``summary``.
+        """
+        return _call_code_agent_tool(_delegation_state(), _writer, instruction)
+
+    tools = [
+        create_todo_write_tool(),
+        StructuredTool.from_function(_call_search_agent, name="call_search_agent"),
+        StructuredTool.from_function(_call_code_agent, name="call_code_agent"),
+    ]
     agent = model.bind_tools(tools)
     tool_map = {tool.name: tool for tool in tools}
 
-    human_text = (
-        f"Task: {state.get('task', '')}\n\n"
-        f"Plan summary: {state.get('plan_summary', '')}\n\n"
-        f"Todos:\n{_render_todos(state.get('todos') or [])}"
-    )
+    task = str(state.get("task") or "")
+    last_error = str(state.get("last_error") or "")
+    if state.get("todos") and last_error:
+        failed = [
+            result
+            for result in state.get("verification_results") or []
+            if not result.get("ok")
+        ]
+        failed_lines = "\n".join(_format_failed_verification(r) for r in failed)
+        instruction_text = (
+            f"Task: {task}\n\n"
+            "The previous plan failed and must be revised.\n"
+            f"Last error: {last_error}\n"
+            f"Failed verifications:\n{failed_lines or '(none)'}\n\n"
+            "Revise the plan with the todo_write tool and delegate only "
+            "the missing fix."
+        )
+    else:
+        instruction_text = (
+            f"Task: {task}\n\n"
+            "Create a plan with the todo_write tool, then delegate "
+            "specialist work as needed."
+        )
+
     messages = [
-        SystemMessage(content=ACTOR_PROMPT),
-        HumanMessage(content=human_text),
+        SystemMessage(content=PLANNER_PROMPT),
+        HumanMessage(content=instruction_text),
     ]
 
-    todos = [dict(todo) for todo in state.get("todos") or []]
-    todos_changed = False
-    new_messages = []
     last_ai_content = ""
-    for _ in range(DEFAULT_MAX_LOOPS):
+    for _ in range(max_loops):
         response = agent.invoke(messages)
         messages.append(response)
-        new_messages.append(response)
         last_ai_content = _response_text(response)
-        _emit(on_event, {"type": "ai_message", "content": last_ai_content})
+        _writer({"type": "ai_message", "content": last_ai_content})
 
         tool_calls = getattr(response, "tool_calls", None) or []
         if not tool_calls:
             break
         for call in tool_calls:
-            _emit(
-                on_event,
-                {"type": "tool_call", "name": call["name"], "args": call.get("args", {})},
+            _writer(
+                {
+                    "type": "tool_call",
+                    "name": call["name"],
+                    "args": call.get("args", {}),
+                }
             )
-            result = _execute_tool(tool_map, call)
-            tool_message = ToolMessage(
-                content=json.dumps(result),
-                tool_call_id=call.get("id") or "",
+            if call["name"] == "todo_write":
+                args = call.get("args") or {}
+                updates["plan_summary"] = str(args.get("plan_summary", ""))
+                updates["todos"] = [
+                    _normalize_todo(raw) for raw in args.get("todos") or []
+                ]
+                updates["acceptance_criteria"] = [
+                    str(c) for c in args.get("acceptance_criteria") or []
+                ]
+                updates["verification_commands"] = [
+                    str(c) for c in args.get("verification_commands") or []
+                ]
+                result: object = "Plan submitted."
+            else:
+                tool = tool_map.get(call["name"])
+                if tool is None:
+                    result = f"Error: unknown tool {call['name']!r}"
+                else:
+                    try:
+                        result = tool.invoke(call.get("args") or {})
+                    except Exception as exc:  # noqa: BLE001 - 错误需回传给模型
+                        result = f"Error: {exc}"
+            messages.append(
+                ToolMessage(
+                    content=json.dumps(result),
+                    tool_call_id=call.get("id") or "",
+                )
             )
-            messages.append(tool_message)
-            new_messages.append(tool_message)
-            _emit(on_event, {"type": "tool_result", "name": call["name"], "result": result})
-            if call["name"] == "todo_update":
-                _apply_todo_update(todos, call.get("args", {}))
-                todos_changed = True
+            _writer({"type": "tool_result", "name": call["name"], "result": result})
 
-    _emit(on_event, {"type": "final_answer", "content": last_ai_content})
-    update = {"messages": new_messages, "last_actor_summary": last_ai_content}
-    if todos_changed:
-        update["todos"] = todos
-    return update
-
-
-def _apply_todo_update(todos: list, args: dict) -> None:
-    todo_id = str(args.get("todo_id", ""))
-    for todo in todos:
-        if todo.get("id") == todo_id:
-            status = args.get("status")
-            if status in _VALID_STATUS:
-                todo["status"] = status
-            if args.get("note"):
-                todo["note"] = str(args["note"])
-            return
-    # 未知 todo_id：todos 由 planner 计划产生，actor 不能新增，忽略即可。
+    return updates
 
 
 def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict:
@@ -273,6 +354,17 @@ def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict
     if todos:
         update["todos"] = todos
     return update
+
+
+def _execute_tool(tool_map: dict, call: dict) -> str:
+    """执行单个 tool_call；未知工具与异常都转为错误文本回传模型。"""
+    tool = tool_map.get(call["name"])
+    if tool is None:
+        return f"Error: unknown tool {call['name']!r}"
+    try:
+        return str(tool.invoke(call["args"]))
+    except Exception as exc:  # noqa: BLE001 - 错误需回传给模型
+        return f"Error: {exc}"
 
 
 def _require_runtime(state: dict, node_name: str) -> RuntimeState:

@@ -29,6 +29,20 @@ class VerificationCheck(TypedDict):
     detail: str
 
 
+class SourceItem(TypedDict, total=False):
+    url: str
+    title: str
+    content: str
+    score: float
+
+
+class AgentHandoff(TypedDict, total=False):
+    from_agent: str
+    to_agent: str
+    instruction: str
+    result: str
+
+
 class NovGraphState(TypedDict, total=False):
     task: str
     runtime: RuntimeState
@@ -38,6 +52,10 @@ class NovGraphState(TypedDict, total=False):
     acceptance_criteria: list[str]
     verification_commands: list[str]
     verification_results: list[VerificationResult]
+    research_notes: str
+    sources: list[SourceItem]
+    agent_handoffs: list[AgentHandoff]
+    code_agent_summary: str
     passed: bool
     attempts: int
     max_attempts: int
