@@ -16,12 +16,12 @@ from novagent.agents.code_agent import run_code_agent
 from novagent.agents.search_agent import run_search_agent
 from novagent.core.state import RuntimeState
 from novagent.graph.state import AgentHandoff, SourceItem
-from novagent.prompts.stage2 import VERIFIER_PROMPT
-from novagent.prompts.stage3 import PLANNER_PROMPT
+from novagent.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 from novagent.providers.openai_provider import create_model
-from novagent.tools.bash_tool import execute_command
+from novagent.tools.bash_tool import create_bash_tool, execute_command
 from novagent.tools.registry import build_read_only_tools
 from novagent.tools.todo_tools import create_todo_write_tool
+from novagent.tools.web_search_tool import WebSearchTool
 
 DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
@@ -288,7 +288,10 @@ def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict
     runtime = _require_runtime(state, "verifier_node")
     if model is None:
         model = create_model()
-    tools = build_read_only_tools(runtime)
+    tools = build_read_only_tools(runtime) + [
+        create_bash_tool(runtime),
+        WebSearchTool,
+    ]
     agent = model.bind_tools(tools)
     tool_map = {tool.name: tool for tool in tools}
 

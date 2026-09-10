@@ -9,8 +9,8 @@ from novagent.core.state import RuntimeState
 from novagent.graph import nodes as graph_nodes
 from novagent.graph.nodes import (
     PLANNER_PROMPT,
-    VERIFIER_PROMPT,
     planner_node,
+    verifier_node,
     verifier_route,
 )
 from novagent.prompts import stage2, stage3
@@ -335,11 +335,46 @@ def test_planner_loop_boundaries(workspace):
     assert update["plan_summary"] == "plan"
 
 
-def test_actor_node_is_removed():
+def test_actor_node_is_removed_and_prompts_migrated():
     assert not hasattr(graph_nodes, "actor_node")
     assert not hasattr(stage2, "PLANNER_PROMPT")
     assert not hasattr(stage2, "ACTOR_PROMPT")
-    assert stage2.VERIFIER_PROMPT
+    assert not hasattr(stage2, "VERIFIER_PROMPT")
     assert stage2.FINAL_PROMPT
-    assert graph_nodes.VERIFIER_PROMPT is stage2.VERIFIER_PROMPT
+    assert graph_nodes.VERIFIER_PROMPT is stage3.VERIFIER_PROMPT
+    assert graph_nodes.VERIFIER_PROMPT.startswith(
+        "You are verifier, a model-based reviewer node."
+    )
+    assert "NotepadReadTool" in graph_nodes.VERIFIER_PROMPT
+    # 原文中 "search the web" 跨行折行，折叠空白后断言
+    assert "search the web" in " ".join(graph_nodes.VERIFIER_PROMPT.split())
+    assert graph_nodes.VERIFIER_PROMPT.rstrip("\n").endswith(
+        "an empty string when passed"
+    )
     assert "verifier_route" in dir(graph_nodes)
+
+
+def test_verifier_binds_four_tools(workspace):
+    verdict = json.dumps(
+        {
+            "passed": True,
+            "reason": "ok",
+            "checks": [],
+            "recommended_next_instruction": "",
+        }
+    )
+    model = FakeModel([AIMessage(content=verdict)])
+    state = _state(workspace, acceptance_criteria=["done"])
+
+    update = verifier_node(state, model=model)
+
+    assert [tool.name for tool in model.bound_tools] == [
+        "read_file",
+        "grep",
+        "bash",
+        "web_search",
+    ]
+    assert update["passed"] is True
+    system_message, human_message = model.calls[0]
+    assert system_message.content == stage3.VERIFIER_PROMPT
+    assert "done" in human_message.content

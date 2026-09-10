@@ -124,7 +124,7 @@ def test_end_to_end_passes_first_try(workspace):
     assert len(fake.calls) == 6
     assert fake.bindings[0] == ["todo_write", "call_search_agent", "call_code_agent"]
     assert fake.bindings[1][0] == "read_file"
-    assert fake.bindings[2] == ["read_file", "grep"]
+    assert fake.bindings[2] == ["read_file", "grep", "bash", "web_search"]
 
 
 def test_end_to_end_retries_after_failure(workspace):
@@ -172,10 +172,13 @@ def test_stage3_prompts_and_node_imports():
         "You are the planner/supervisor node in novagent stage 3."
     )
     assert "CallSearchAgentTool" in stage3.PLANNER_PROMPT
-    assert stage2.VERIFIER_PROMPT
+    assert stage3.VERIFIER_PROMPT.startswith(
+        "You are verifier, a model-based reviewer node."
+    )
     assert stage2.FINAL_PROMPT
     assert not hasattr(stage2, "PLANNER_PROMPT")
     assert not hasattr(stage2, "ACTOR_PROMPT")
+    assert not hasattr(stage2, "VERIFIER_PROMPT")
     assert graph_nodes.PLANNER_PROMPT is stage3.PLANNER_PROMPT
-    assert graph_nodes.VERIFIER_PROMPT is stage2.VERIFIER_PROMPT
+    assert graph_nodes.VERIFIER_PROMPT is stage3.VERIFIER_PROMPT
     assert not hasattr(graph_nodes, "actor_node")

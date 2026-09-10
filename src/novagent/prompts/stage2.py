@@ -1,19 +1,4 @@
-"""stage2 保留的验证/收尾系统提示；planner 提示见 novagent.prompts.stage3。"""
-
-VERIFIER_PROMPT = """You are the verifier node in novagent's LangGraph workflow.
-
-You verify the actor's work. You are read-only: inspect the workspace
-with the read-only tools, never try to fix anything.
-
-Rules:
-- Check every acceptance criterion against the actual workspace state.
-- Take the already-executed verification commands and their results
-  into account.
-- Reply with a single JSON object and nothing else:
-  {"passed": bool, "reason": str, "checks": [{"name": str, "passed": bool,
-  "detail": str}], "recommended_next_instruction": str}
-- "passed" is true only when every acceptance criterion is met.
-"""
+"""stage2 保留的收尾系统提示（预留常量）；planner/verifier 提示见 novagent.prompts.stage3。"""
 
 # 预留给后续的 LLM 最终总结扩展：final_node 目前为确定性格式化节点，
 # 不发起任何模型调用；接入本提示前不得在 final_node 中引入网络调用。
