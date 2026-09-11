@@ -1,8 +1,9 @@
 """LangGraph 工作流节点：planner（supervisor）/ verifier 与条件路由。
 
 节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通
-dict 更新。planner 的协调事件（含受托专家 Agent 的内部事件）经
-``on_event`` 即时发出，事件 schema 与统一事件流一致。
+dict 更新。planner 的协调事件（含受托专家 Agent 的内部事件与分层记忆
+事件）经 ``on_event`` 即时发出，事件 schema 与统一事件流一致。
+planner 与 verifier 在入口组装分层记忆并拼接进各自的 HumanMessage。
 """
 
 import json
@@ -15,6 +16,11 @@ from langchain_core.tools import StructuredTool
 from novagent.agents.code_agent import run_code_agent
 from novagent.agents.search_agent import run_search_agent
 from novagent.core.state import RuntimeState
+from novagent.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+    memory_event,
+)
 from novagent.graph.state import AgentHandoff, SourceItem
 from novagent.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 from novagent.providers.openai_provider import create_model
@@ -27,6 +33,41 @@ DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
 
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
+
+
+def _append_layered_memory(human_text: str, memory: dict) -> str:
+    """把分层记忆 JSON 以固定标头拼接在 HumanMessage 文本末尾。"""
+    return (
+        f"{human_text}\n\nLayered memory:\n{format_layered_memory_for_prompt(memory)}"
+    )
+
+
+def _planner_input(state: dict, memory: dict) -> str:
+    """构造 planner 的 HumanMessage：首轮/修订指令文本 + 分层记忆 JSON。"""
+    task = str(state.get("task") or "")
+    last_error = str(state.get("last_error") or "")
+    if state.get("todos") and last_error:
+        failed = [
+            result
+            for result in state.get("verification_results") or []
+            if not result.get("ok")
+        ]
+        failed_lines = "\n".join(_format_failed_verification(r) for r in failed)
+        instruction_text = (
+            f"Task: {task}\n\n"
+            "The previous plan failed and must be revised.\n"
+            f"Last error: {last_error}\n"
+            f"Failed verifications:\n{failed_lines or '(none)'}\n\n"
+            "Revise the plan with the todo_write tool and delegate only "
+            "the missing fix."
+        )
+    else:
+        instruction_text = (
+            f"Task: {task}\n\n"
+            "Create a plan with the todo_write tool, then delegate "
+            "specialist work as needed."
+        )
+    return _append_layered_memory(instruction_text, memory)
 
 
 def _format_failed_verification(result: dict) -> str:
@@ -77,6 +118,10 @@ def planner_node(
     def _writer(event: dict) -> None:
         if on_event is not None:
             on_event(event)
+
+    # 分层记忆在入口组装一次；事件先于本节点所有其他事件发出。
+    memory = build_layered_memory(state, node="planner")
+    _writer(memory_event(memory, node="planner"))
 
     def _delegation_state() -> dict:
         # 委托应看到本节点内已产生的更新（计划 todos、研究笔记），
@@ -203,33 +248,9 @@ def planner_node(
     agent = model.bind_tools(tools)
     tool_map = {tool.name: tool for tool in tools}
 
-    task = str(state.get("task") or "")
-    last_error = str(state.get("last_error") or "")
-    if state.get("todos") and last_error:
-        failed = [
-            result
-            for result in state.get("verification_results") or []
-            if not result.get("ok")
-        ]
-        failed_lines = "\n".join(_format_failed_verification(r) for r in failed)
-        instruction_text = (
-            f"Task: {task}\n\n"
-            "The previous plan failed and must be revised.\n"
-            f"Last error: {last_error}\n"
-            f"Failed verifications:\n{failed_lines or '(none)'}\n\n"
-            "Revise the plan with the todo_write tool and delegate only "
-            "the missing fix."
-        )
-    else:
-        instruction_text = (
-            f"Task: {task}\n\n"
-            "Create a plan with the todo_write tool, then delegate "
-            "specialist work as needed."
-        )
-
     messages = [
         SystemMessage(content=PLANNER_PROMPT),
-        HumanMessage(content=instruction_text),
+        HumanMessage(content=_planner_input(state, memory)),
     ]
 
     last_ai_content = ""
@@ -283,18 +304,8 @@ def planner_node(
     return updates
 
 
-def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict:
-    """只读核查验收标准，运行验证命令，产出验收结论。"""
-    runtime = _require_runtime(state, "verifier_node")
-    if model is None:
-        model = create_model()
-    tools = build_read_only_tools(runtime) + [
-        create_bash_tool(runtime),
-        WebSearchTool,
-    ]
-    agent = model.bind_tools(tools)
-    tool_map = {tool.name: tool for tool in tools}
-
+def _verifier_input(state: dict, memory: dict) -> str:
+    """构造 verifier 的 HumanMessage：验收文本 + 分层记忆 JSON。"""
     commands = state.get("verification_commands") or []
     human_text = (
         f"Task: {state.get('task', '')}\n\n"
@@ -308,9 +319,26 @@ def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict
         "a JSON object {\"passed\": bool, \"reason\": str, \"checks\": "
         "[{\"name\", \"passed\", \"detail\"}], \"recommended_next_instruction\": str}."
     )
+    return _append_layered_memory(human_text, memory)
+
+
+def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict:
+    """只读核查验收标准，运行验证命令，产出验收结论。"""
+    runtime = _require_runtime(state, "verifier_node")
+    if model is None:
+        model = create_model()
+    tools = build_read_only_tools(runtime) + [
+        create_bash_tool(runtime),
+        WebSearchTool,
+    ]
+    agent = model.bind_tools(tools)
+    tool_map = {tool.name: tool for tool in tools}
+
+    commands = state.get("verification_commands") or []
+    memory = build_layered_memory(state, node="verifier")
     messages = [
         SystemMessage(content=VERIFIER_PROMPT),
-        HumanMessage(content=human_text),
+        HumanMessage(content=_verifier_input(state, memory)),
     ]
 
     last_ai_content = ""

@@ -122,6 +122,8 @@ def test_react_loop_collects_queries_sources_and_events():
     assert "research LangGraph" in human_message.content
     assert "find official docs" in human_message.content
     assert "prior notes about X" in human_message.content
+    # searchAgent 不在分层记忆注入范围内（planner/codeAgent/verifier 专属）
+    assert "Layered memory:" not in human_message.content
 
 
 def test_missing_research_notes_is_labelled():

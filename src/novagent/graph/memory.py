@@ -169,3 +169,8 @@ def build_layered_memory(state: dict, *, node: str = "graph") -> dict:
 def format_layered_memory_for_prompt(memory: dict) -> str:
     """把分层记忆序列化为可注入 prompt 的 JSON 文本。"""
     return json.dumps(memory, ensure_ascii=False)
+
+
+def memory_event(memory: dict, *, node: str = "graph") -> dict:
+    """构造运行时的分层记忆事件：统一事件流中的 ``type="memory"`` 事件。"""
+    return {"type": "memory", "node": node, "memory": memory}

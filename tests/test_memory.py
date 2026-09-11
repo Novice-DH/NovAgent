@@ -7,6 +7,7 @@ from novagent.graph.memory import (
     RULES_LAYER,
     build_layered_memory,
     format_layered_memory_for_prompt,
+    memory_event,
     read_history_summary,
     read_notepad,
 )
@@ -287,3 +288,11 @@ def test_nov_graph_state_has_memory_fields():
     assert "compression_events" in annotations
     assert "memory_snapshot" in annotations
     assert "history_summary" in annotations
+
+
+def test_memory_event_shape():
+    memory = {"rules": {"scope": "workspace"}}
+    event = memory_event(memory, node="planner")
+    assert event == {"type": "memory", "node": "planner", "memory": memory}
+    assert event["memory"] is memory
+    assert memory_event(memory)["node"] == "graph"
