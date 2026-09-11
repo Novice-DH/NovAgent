@@ -1,15 +1,23 @@
-"""stage3 LangGraph 工作流组装：planner(supervisor) → verifier 循环。"""
+"""stage3 LangGraph 工作流组装：planner(supervisor) → 上下文监控/压缩 → verifier 循环。"""
 
 from functools import partial
 
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from novagent.graph.nodes import final_node, planner_node, verifier_node, verifier_route
+from novagent.graph.nodes import (
+    context_compressor_node,
+    context_compressor_route,
+    context_monitor_node,
+    context_monitor_route,
+    final_node,
+    planner_node,
+    verifier_node,
+)
 from novagent.graph.state import NovGraphState
 
 
-def build_workflow(*, model=None):
+def build_complex_workflow(*, model=None):
     """组装并编译 stage3 工作流图。
 
     ``model`` 为离线注入的聊天模型；None 时各节点内部调用
@@ -30,18 +38,32 @@ def build_workflow(*, model=None):
         return planner_node(state, model=model, on_event=_writer)
 
     graph.add_node("planner", _planner)
+    graph.add_node("context_monitor", partial(context_monitor_node, model=model))
+    graph.add_node("context_compressor", context_compressor_node)
     graph.add_node("verifier", partial(verifier_node, model=model))
     graph.add_node("final", final_node)
 
     graph.add_edge(START, "planner")
-    graph.add_edge("planner", "verifier")
+    graph.add_edge("planner", "context_monitor")
     graph.add_conditional_edges(
-        "verifier",
-        verifier_route,
+        "context_monitor",
+        context_monitor_route,
         {
-            "final": "final",
+            "context_compressor": "context_compressor",
+            "verifier": "verifier",
             "planner": "planner",
+            "final": "final",
         },
     )
+    graph.add_conditional_edges(
+        "context_compressor",
+        context_compressor_route,
+        {
+            "verifier": "verifier",
+            "planner": "planner",
+            "final": "final",
+        },
+    )
+    graph.add_edge("verifier", "context_monitor")  # 验证后也过 monitor
     graph.add_edge("final", END)
     return graph.compile()

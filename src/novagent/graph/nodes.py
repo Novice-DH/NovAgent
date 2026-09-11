@@ -1,4 +1,4 @@
-"""LangGraph 工作流节点：planner（supervisor）/ verifier 与条件路由。
+"""LangGraph 工作流节点：planner（supervisor）/ verifier / 上下文监控与压缩 / final 与条件路由。
 
 节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通
 dict 更新。planner 的协调事件（含受托专家 Agent 的内部事件）经
@@ -74,7 +74,8 @@ def planner_node(
     if model is None:
         model = create_model()
 
-    updates: dict = {}
+    # 上游设置约定：规划完成后进入验证，供 context_monitor_route 回环决策
+    updates: dict = {"context_next_node": DEFAULT_CONTEXT_NEXT_NODE}
     handoffs: list[AgentHandoff] = []
     research_notes = str(state.get("research_notes") or "")
     sources: list[SourceItem] = list(state.get("sources") or [])
@@ -362,6 +363,9 @@ def verifier_node(state: dict, *, model: Optional[BaseChatModel] = None) -> dict
                 todo["status"] = "blocked"
     if todos:
         update["todos"] = todos
+    if not passed and attempts < state.get("max_attempts", DEFAULT_MAX_ATTEMPTS):
+        # 上游设置约定：失败且预算未尽时回到 planner 修订
+        update["context_next_node"] = "planner"
     return update
 
 
@@ -491,16 +495,6 @@ def final_node(state: dict) -> dict:
     return {"final_answer": answer}
 
 
-def verifier_route(state: dict) -> str:
-    """verifier 之后的条件路由：通过或预算耗尽走 ``final``，否则回 planner。"""
-    if state.get("passed"):
-        return "final"
-    attempts = state.get("attempts") or 0
-    if attempts >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS):
-        return "final"
-    return "planner"
-
-
 def _estimate_tokens(messages, model) -> int:
     """优先用模型的 tokenizer 计数；不可用时按字符数粗估（约 4 字符/token）。"""
     if model is not None:
@@ -536,9 +530,31 @@ def context_monitor_node(state: dict, *, model=None) -> dict:
 
 
 def context_monitor_route(state: dict) -> str:
-    """context monitor 之后的条件路由；``context_compressor`` 为后续压缩器 change 预留。"""
+    """context monitor 之后的条件路由（build_complex_workflow 接线）。
+
+    优先级：passed → final；预算耗尽 → final（verifier 无条件边直连
+    final，终止语义由本路由承担）；应压缩 → context_compressor；否则
+    按上游设置的 ``context_next_node`` 回环（缺失默认 verifier）。
+    """
     if state.get("passed"):
+        return "final"
+    attempts = state.get("attempts") or 0
+    if attempts >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS):
         return "final"
     if state.get("context_should_compress"):
         return "context_compressor"
+    return state.get("context_next_node") or DEFAULT_CONTEXT_NEXT_NODE
+
+
+def context_compressor_node(state: dict) -> dict:
+    """上下文压缩占位节点：仅清除压缩标记，真实压缩逻辑属后续 change。
+
+    确定性节点：不调模型对话、不构造模型、无网络、不写文件、不修改
+    传入 state。
+    """
+    return {"context_should_compress": False}
+
+
+def context_compressor_route(state: dict) -> str:
+    """context compressor 之后的条件路由：按上游设置的 ``context_next_node`` 回环。"""
     return state.get("context_next_node") or DEFAULT_CONTEXT_NEXT_NODE

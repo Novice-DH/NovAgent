@@ -11,7 +11,6 @@ from novagent.graph.nodes import (
     PLANNER_PROMPT,
     planner_node,
     verifier_node,
-    verifier_route,
 )
 from novagent.prompts import stage2, stage3
 
@@ -145,6 +144,7 @@ def test_planner_publishes_plan(workspace):
     )
 
     assert update["plan_summary"] == "plan"
+    assert update["context_next_node"] == "verifier"
     assert update["todos"] == [
         {"id": "t1", "content": "step", "status": "pending", "note": ""}
     ]
@@ -323,7 +323,7 @@ def test_planner_loop_boundaries(workspace):
     model = FakeModel([AIMessage(content="nothing to do.")])
     update = planner_node(_state(workspace), model=model)
     assert len(model.calls) == 1
-    assert update == {}
+    assert update == {"context_next_node": "verifier"}
 
     model = FakeModel(
         [
@@ -351,7 +351,7 @@ def test_actor_node_is_removed_and_prompts_migrated():
     assert graph_nodes.VERIFIER_PROMPT.rstrip("\n").endswith(
         "an empty string when passed"
     )
-    assert "verifier_route" in dir(graph_nodes)
+    assert "verifier_route" not in dir(graph_nodes)
 
 
 def test_verifier_binds_four_tools(workspace):
@@ -375,6 +375,46 @@ def test_verifier_binds_four_tools(workspace):
         "web_search",
     ]
     assert update["passed"] is True
+    assert "context_next_node" not in update
     system_message, human_message = model.calls[0]
     assert system_message.content == stage3.VERIFIER_PROMPT
     assert "done" in human_message.content
+
+
+def test_verifier_sets_context_next_node_on_failure(workspace):
+    verdict = json.dumps(
+        {
+            "passed": False,
+            "reason": "broken",
+            "checks": [],
+            "recommended_next_instruction": "fix it",
+        }
+    )
+
+    update = verifier_node(
+        _state(workspace, attempts=0, max_attempts=3),
+        model=FakeModel([AIMessage(content=verdict)]),
+    )
+
+    assert update["passed"] is False
+    assert update["attempts"] == 1
+    assert update["context_next_node"] == "planner"
+
+
+def test_verifier_omits_context_next_node_when_budget_exhausted(workspace):
+    verdict = json.dumps(
+        {
+            "passed": False,
+            "reason": "broken",
+            "checks": [],
+            "recommended_next_instruction": "fix it",
+        }
+    )
+
+    update = verifier_node(
+        _state(workspace, attempts=2, max_attempts=3),
+        model=FakeModel([AIMessage(content=verdict)]),
+    )
+
+    assert update["attempts"] == 3
+    assert "context_next_node" not in update

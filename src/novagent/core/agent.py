@@ -6,7 +6,7 @@ from typing import Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from novagent.core.state import RuntimeState
-from novagent.graph.workflow import build_workflow
+from novagent.graph.workflow import build_complex_workflow
 
 
 def stream_agent_events(
@@ -27,11 +27,11 @@ def stream_agent_events(
     - ``ai_message``/``tool_call``/``tool_result``/``final_answer``：
       actor ReAct 循环的内部事件（``custom`` 流实时转发）。
 
-    ``max_attempts`` 是验证重试预算，经 ``verifier_route`` 决定失败后
-    回 planner 修订还是进入 final 节点。
+    ``max_attempts`` 是验证重试预算：失败且预算未尽时经 context monitor
+    路由回 planner 修订，通过或预算耗尽进入 final 节点。
     """
     state = RuntimeState(workspace=workspace)
-    graph = build_workflow(model=model)
+    graph = build_complex_workflow(model=model)
     inputs = {"task": task, "runtime": state, "max_attempts": max_attempts}
 
     for mode, payload in graph.stream(inputs, stream_mode=["updates", "custom"]):

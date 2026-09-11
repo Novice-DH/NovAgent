@@ -5,10 +5,11 @@ import sys
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+import novagent.graph.workflow as workflow_module
 from novagent.core.state import RuntimeState
 from novagent.graph import nodes as graph_nodes
 from novagent.graph.nodes import final_node
-from novagent.graph.workflow import build_workflow
+from novagent.graph.workflow import build_complex_workflow
 from novagent.prompts import stage2, stage3
 
 
@@ -70,14 +71,53 @@ def _initial_state(workspace):
     }
 
 
-def test_builds_three_node_graph():
-    graph = build_workflow()
+def _update_sequence(graph, state):
+    """按执行顺序返回 updates 流中的节点名序列（custom 事件不产生节点）。"""
+    return [
+        next(iter(payload))
+        for mode, payload in graph.stream(state, stream_mode=["updates", "custom"])
+        if mode == "updates"
+    ]
 
-    assert set(graph.nodes) == {"planner", "verifier", "final", "__start__"}
+
+def test_builds_five_node_graph():
+    graph = build_complex_workflow()
+
+    assert set(graph.nodes) == {
+        "planner",
+        "context_monitor",
+        "context_compressor",
+        "verifier",
+        "final",
+        "__start__",
+    }
     edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
     assert ("__start__", "planner") in edges
-    assert ("planner", "verifier") in edges
+    assert ("planner", "context_monitor") in edges
+    assert ("verifier", "context_monitor") in edges
     assert ("final", "__end__") in edges
+
+
+def test_conditional_edge_targets():
+    graph = build_complex_workflow()
+
+    conditional: dict = {}
+    for edge in graph.get_graph().edges:
+        if getattr(edge, "conditional", False):
+            conditional.setdefault(edge.source, set()).add(edge.target)
+
+    assert conditional["context_monitor"] == {
+        "context_compressor",
+        "verifier",
+        "planner",
+        "final",
+    }
+    assert conditional["context_compressor"] == {"verifier", "planner", "final"}
+
+
+def test_old_builder_and_route_are_removed():
+    assert not hasattr(workflow_module, "build_workflow")
+    assert not hasattr(graph_nodes, "verifier_route")
 
 
 def test_end_to_end_passes_first_try(workspace):
@@ -103,7 +143,7 @@ def test_end_to_end_passes_first_try(workspace):
         ]
     )
 
-    final = build_workflow(model=fake).invoke(_initial_state(workspace))
+    final = build_complex_workflow(model=fake).invoke(_initial_state(workspace))
 
     assert final["passed"] is True
     assert final["attempts"] == 1
@@ -127,6 +167,29 @@ def test_end_to_end_passes_first_try(workspace):
     assert fake.bindings[2] == ["read_file", "grep", "bash", "web_search"]
 
 
+def test_node_sequence_passes_through_context_monitor(workspace):
+    ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
+    fake = FakeModel(
+        [
+            _tool_call("todo_write", _plan_args([ok_command]), "c1"),
+            AIMessage(content="Plan ready."),
+            AIMessage(content=PASS_JSON),
+        ]
+    )
+
+    sequence = _update_sequence(
+        build_complex_workflow(model=fake), _initial_state(workspace)
+    )
+
+    assert sequence == [
+        "planner",
+        "context_monitor",
+        "verifier",
+        "context_monitor",
+        "final",
+    ]
+
+
 def test_end_to_end_retries_after_failure(workspace):
     bad_command = f'"{sys.executable}" -c "raise SystemExit(1)"'
     ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
@@ -143,7 +206,7 @@ def test_end_to_end_retries_after_failure(workspace):
         ]
     )
 
-    final = build_workflow(model=fake).invoke(_initial_state(workspace))
+    final = build_complex_workflow(model=fake).invoke(_initial_state(workspace))
 
     assert final["passed"] is True
     assert final["attempts"] == 2
@@ -151,6 +214,66 @@ def test_end_to_end_retries_after_failure(workspace):
     revise_call = fake.calls[3]
     assert isinstance(revise_call[1], HumanMessage)
     assert "tests broke" in revise_call[1].content
+
+
+def test_exhausted_budget_ends_via_context_monitor(workspace):
+    bad_command = f'"{sys.executable}" -c "raise SystemExit(1)"'
+    fake = FakeModel(
+        [
+            _tool_call("todo_write", _plan_args([bad_command]), "c1"),
+            AIMessage(content="Plan ready."),
+            AIMessage(content=FAIL_JSON),
+        ]
+    )
+    initial = _initial_state(workspace)
+    initial["max_attempts"] = 1
+
+    graph = build_complex_workflow(model=fake)
+    sequence = _update_sequence(graph, initial)
+
+    assert sequence == [
+        "planner",
+        "context_monitor",
+        "verifier",
+        "context_monitor",
+        "final",
+    ]
+
+
+def test_compression_branch_routes_through_compressor(workspace):
+    ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
+    fake = FakeModel(
+        [
+            _tool_call("todo_write", _plan_args([ok_command]), "c1"),
+            AIMessage(content="Plan ready."),
+            AIMessage(content=PASS_JSON),
+        ]
+    )
+    initial = _initial_state(workspace)
+    initial["context_token_limit"] = 1  # 任何非零计数都触发压缩
+
+    graph = build_complex_workflow(model=fake)
+    sequence = []
+    compressor_update = None
+    for mode, payload in graph.stream(
+        initial, stream_mode=["updates", "custom"]
+    ):
+        if mode != "updates":
+            continue
+        node = next(iter(payload))
+        sequence.append(node)
+        if node == "context_compressor":
+            compressor_update = payload["context_compressor"]
+
+    assert sequence == [
+        "planner",
+        "context_monitor",
+        "context_compressor",
+        "verifier",
+        "context_monitor",
+        "final",
+    ]
+    assert compressor_update == {"context_should_compress": False}
 
 
 def test_final_node_formats_success_and_failure():

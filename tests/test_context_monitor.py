@@ -143,6 +143,75 @@ def test_route_priority():
     )
 
 
+def test_route_budget_exhausted_goes_final():
+    assert (
+        context_monitor_route(
+            _state(
+                passed=False,
+                attempts=3,
+                max_attempts=3,
+                context_should_compress=True,
+            )
+        )
+        == "final"
+    )
+
+
+def test_route_budget_remaining_still_compresses():
+    assert (
+        context_monitor_route(
+            _state(
+                passed=False,
+                attempts=2,
+                max_attempts=3,
+                context_should_compress=True,
+            )
+        )
+        == "context_compressor"
+    )
+
+
+def test_route_passed_beats_budget_and_compression():
+    assert (
+        context_monitor_route(
+            _state(
+                passed=True,
+                attempts=5,
+                max_attempts=3,
+                context_should_compress=True,
+            )
+        )
+        == "final"
+    )
+
+
+def test_compressor_node_placeholder(monkeypatch):
+    monkeypatch.setattr(graph_nodes, "create_model", _forbidden_create_model)
+    state = _state(context_should_compress=True, context_next_node="planner")
+    snapshot = json.dumps(state, sort_keys=True, default=str)
+
+    result = graph_nodes.context_compressor_node(state)
+
+    assert result == {"context_should_compress": False}
+    assert json.dumps(state, sort_keys=True, default=str) == snapshot
+
+
+def test_compressor_route():
+    assert (
+        graph_nodes.context_compressor_route(_state(context_next_node="planner"))
+        == "planner"
+    )
+    assert (
+        graph_nodes.context_compressor_route(_state(context_next_node="verifier"))
+        == "verifier"
+    )
+    assert (
+        graph_nodes.context_compressor_route(_state(context_next_node="final"))
+        == "final"
+    )
+    assert graph_nodes.context_compressor_route(_state()) == "verifier"
+
+
 def test_does_not_mutate_state(monkeypatch):
     monkeypatch.setattr(graph_nodes, "create_model", _forbidden_create_model)
     state = _state(context_token_limit=10, context_next_node="planner")
