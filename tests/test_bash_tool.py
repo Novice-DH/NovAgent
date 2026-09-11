@@ -36,3 +36,30 @@ def test_timeout_kills_process_tree_within_time_bound(by_name):
 def test_timeout_must_be_positive(by_name):
     with pytest.raises(ValueError, match="timeout_seconds"):
         by_name["bash"].invoke({"command": "echo hi", "timeout_seconds": 0})
+
+
+def test_risky_command_with_auto_mode_carries_approval_markers(state, monkeypatch):
+    from novagent.core.state import RuntimeState
+    from novagent.tools.bash_tool import create_bash_tool
+
+    monkeypatch.setattr(
+        "novagent.tools.bash_tool.execute_command",
+        lambda command, cwd, timeout_seconds=30.0: (0, "ok output", ""),
+    )
+    auto_state = RuntimeState(workspace=state.workspace, approval_mode="auto")
+    output = create_bash_tool(auto_state).invoke({"command": "pip install flask"})
+    assert "requires_approval: True" in output
+    assert "approved: True" in output
+    assert "exit_code: 0" in output
+
+
+def test_default_state_denies_risky_commands_without_execution(state, monkeypatch):
+    from novagent.core.state import RuntimeState
+    from novagent.tools.bash_tool import create_bash_tool
+
+    def fail(*args, **kwargs):
+        raise AssertionError("command must not be executed without approval")
+
+    monkeypatch.setattr("novagent.tools.bash_tool.execute_command", fail)
+    output = create_bash_tool(state).invoke({"command": "npm install"})
+    assert "human approval required" in output

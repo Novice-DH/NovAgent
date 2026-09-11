@@ -48,10 +48,12 @@ def test_default_workspace_is_created(tmp_path, monkeypatch):
 
 
 def _fake_stream(recorded):
-    """构造统一事件格式的假事件流，记录收到的 max_attempts。"""
+    """构造统一事件格式的假事件流，记录收到的 max_attempts 与 Harness 参数。"""
 
-    def fake_stream(task, *, workspace, max_attempts=3, model=None):
-        recorded.append(max_attempts)
+    def fake_stream(
+        task, *, workspace, max_attempts=3, model=None, **harness_kwargs
+    ):
+        recorded.append({"max_attempts": max_attempts, **harness_kwargs})
         yield {
             "type": "node_output",
             "node": "planner",
@@ -109,7 +111,7 @@ def test_rich_prints_node_badges_in_order(tmp_path, monkeypatch):
     assert result.exit_code == 0
     text = _output(result)
 
-    assert recorded == [2]
+    assert recorded[0]["max_attempts"] == 2
     assert "📋 Planner" in text
     assert "🔧 Actor" in text
     assert "✅ Verifier" in text
@@ -137,13 +139,15 @@ def test_max_attempts_defaults_to_three(tmp_path, monkeypatch):
     )
     result = runner.invoke(app, ["demo task", "--workspace", str(tmp_path / "ws")])
     assert result.exit_code == 0
-    assert recorded == [3]
+    assert recorded[0]["max_attempts"] == 3
 
 
 def test_failed_verifier_shows_cross_badge(tmp_path, monkeypatch):
     from novagent.cli import app as app_module
 
-    def fake_stream(task, *, workspace, max_attempts=3, model=None):
+    def fake_stream(
+        task, *, workspace, max_attempts=3, model=None, **harness_kwargs
+    ):
         yield {
             "type": "node_output",
             "node": "planner",
@@ -177,3 +181,77 @@ def test_failed_verifier_shows_cross_badge(tmp_path, monkeypatch):
     assert "tests broke" in text
     assert "exit 3" in text
     assert "Task failed after 1 attempt(s)." in text
+
+
+def test_help_lists_harness_options():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    text = _output(result)
+    assert "--approval-mode" in text
+    assert "--checkpoint-mode" in text
+    assert "--trace-mode" in text
+    assert "--resume" in text
+    lowered = text.lower()
+    for value in ("inline", "auto", "deny", "light", "strict", "off"):
+        assert value in lowered
+
+
+def test_missing_task_without_resume_is_a_usage_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, [], env={"OPENAI_API_KEY": ""})
+    assert result.exit_code == 2
+
+
+def test_resume_without_checkpoint_fails_cleanly(tmp_path):
+    empty = tmp_path / "empty-ws"
+    empty.mkdir()
+    result = runner.invoke(app, ["--resume", str(empty)], env={"OPENAI_API_KEY": ""})
+    assert result.exit_code == 1
+    # rich 可能按终端宽度折行长路径，比较时去掉换行
+    assert str(empty) in _output(result).replace("\n", "")
+
+
+def test_resume_conflicting_workspace_is_rejected(tmp_path):
+    resume_ws = tmp_path / "resume-ws"
+    resume_ws.mkdir()
+    other = tmp_path / "other-ws"
+    other.mkdir()
+    result = runner.invoke(
+        app, ["--resume", str(resume_ws), "--workspace", str(other)]
+    )
+    assert result.exit_code == 2
+    text = _output(result).replace("\n", "")
+    assert str(resume_ws) in text
+    assert str(other) in text
+
+
+def test_harness_kwargs_are_forwarded(tmp_path, monkeypatch):
+    from novagent.cli import app as app_module
+
+    recorded = []
+    monkeypatch.setattr(app_module, "create_model", lambda: object())
+    monkeypatch.setattr(
+        app_module, "stream_agent_events", _fake_stream(recorded)
+    )
+    result = runner.invoke(
+        app,
+        [
+            "demo task",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--approval-mode",
+            "auto",
+            "--checkpoint-mode",
+            "off",
+            "--trace-mode",
+            "off",
+        ],
+    )
+    assert result.exit_code == 0
+    (payload,) = recorded
+    assert payload["approval_mode"] == "auto"
+    assert payload["checkpoint_mode"] == "off"
+    assert payload["trace_mode"] == "off"
+    assert payload["resume_workspace"] is None
+    # inline 模式才注入终端审批 handler
+    assert payload["approval_handler"] is None

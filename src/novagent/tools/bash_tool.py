@@ -1,13 +1,69 @@
-"""工作区内 shell 命令执行工具。"""
+"""工作区内 shell 命令执行工具（含风险命令人类在环审批）。"""
 
+import json
 import os
 import subprocess
 
 from langchain_core.tools import StructuredTool
 
+from novagent.core.approval import (
+    ApprovalDecision,
+    classify_command_risk,
+    make_approval_request,
+    normalize_approval_mode,
+)
 from novagent.core.state import RuntimeState
 
 _KILL_COLLECT_GRACE_SECONDS = 5.0
+
+
+def _resolve_approval(state: RuntimeState, command: str) -> dict | None:
+    """风险命令审批分流；安全命令返回 ``None`` 直接放行。
+
+    命中 ``RISK_PATTERNS`` 时按 ``approval_mode`` 处理：``auto`` 放行；
+    ``deny``（或 ``inline`` 缺少 handler）拒绝；``inline`` 调用
+    ``approval_handler`` 等待人类决策。每次风险分流都向
+    ``state.approval_log`` 追加一条记录。
+    """
+    risk_reason = classify_command_risk(command)
+    if risk_reason is None:
+        return None
+
+    mode = normalize_approval_mode(getattr(state, "approval_mode", None))
+    if mode == "auto":
+        approved = True
+        denial = None
+    elif mode == "deny" or state.approval_handler is None:
+        approved = False
+        denial = f"human approval required: {risk_reason}"
+    else:
+        request = make_approval_request(command, risk_reason)
+        decision = state.approval_handler(request)
+        approved = (
+            decision.approved
+            if isinstance(decision, ApprovalDecision)
+            else bool(decision)
+        )
+        denial = None if approved else f"human rejected: {risk_reason}"
+
+    state.approval_log.append(
+        {
+            "command": command,
+            "risk_reason": risk_reason,
+            "mode": mode,
+            "approved": approved,
+        }
+    )
+    result = {
+        "requires_approval": True,
+        "risk_reason": risk_reason,
+        "command": command,
+        "approved": approved,
+    }
+    if denial is not None:
+        result["ok"] = False
+        result["error"] = denial
+    return result
 
 
 def _popen_kwargs() -> dict:
@@ -76,18 +132,31 @@ def create_bash_tool(state: RuntimeState) -> StructuredTool:
         Uses the platform shell (cmd.exe on Windows). On timeout the whole
         child process tree is killed before the error is raised.
 
+        Risky commands (dependency installs, downloads, dev servers) go
+        through human approval first: they are executed only when the
+        approval mode allows it, and the result text carries
+        ``requires_approval``/``approved`` marker lines.
+
         Args:
             command: The shell command line to execute.
             timeout_seconds: Kill the child process tree and fail after
                 this many seconds.
 
         Returns:
-            The exit code together with captured stdout and stderr.
+            The exit code together with captured stdout and stderr, or a
+            JSON approval-denial payload when the command was blocked.
         """
+        approval = _resolve_approval(state, command)
+        if approval is not None and not approval.get("approved"):
+            return json.dumps(approval, ensure_ascii=False)
         exit_code, stdout, stderr = execute_command(
             command, cwd=state.workspace, timeout_seconds=timeout_seconds
         )
-        parts = [f"exit_code: {exit_code}"]
+        parts = []
+        if approval is not None:
+            parts.append("requires_approval: True")
+            parts.append("approved: True")
+        parts.append(f"exit_code: {exit_code}")
         if stdout:
             parts.append(f"stdout:\n{stdout.rstrip()}")
         if stderr:
