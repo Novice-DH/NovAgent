@@ -99,7 +99,19 @@ def test_pass_path_emits_planner_coordination_events(workspace):
     )
     assert ("handoff", "planner") in types_and_nodes
     planner_custom = [event for event in events if event.get("node") == "planner"]
-    assert [event["type"] for event in planner_custom][0] == "ai_message"
+    # 首条 planner 内部事件为分层记忆事件，先于任何 ai_message；
+    # 受托 codeAgent 的 memory 事件同样透传（身份在 memory.working_memory.node）。
+    assert [event["type"] for event in planner_custom][0] == "memory"
+    assert planner_custom[0]["memory"]["working_memory"]["node"] == "planner"
+    memory_events = [
+        event for event in planner_custom if event.get("type") == "memory"
+    ]
+    assert {event["memory"]["working_memory"]["node"] for event in memory_events} == {
+        "planner",
+        "codeAgent",
+    }
+    first_ai_index = [event["type"] for event in planner_custom].index("ai_message")
+    assert first_ai_index == 1
     assert "handoff" in [event["type"] for event in planner_custom]
     # 受托 codeAgent 的内部事件也经 planner writer 透传
     assert ("tool_call", "planner") in types_and_nodes

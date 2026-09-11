@@ -62,6 +62,15 @@ def _fake_stream(recorded):
         }
         yield {"type": "ai_message", "node": "actor", "content": "Let me check."}
         yield {
+            "type": "memory",
+            "node": "planner",
+            "memory": {
+                "rules": {"scope": "workspace"},
+                "working_memory": {"node": "planner", "task": "demo task"},
+                "history_summary_store": {},
+            },
+        }
+        yield {
             "type": "tool_call",
             "node": "actor",
             "name": "bash",
@@ -114,6 +123,8 @@ def test_rich_prints_node_badges_in_order(tmp_path, monkeypatch):
     assert 0 <= pos_bash < pos_args < pos_result < pos_final
     assert "❌" not in text
     assert "exit 0" in text
+    # memory 事件当前不渲染：记忆内容不出现在 CLI 输出
+    assert "working_memory" not in text
 
 
 def test_max_attempts_defaults_to_three(tmp_path, monkeypatch):

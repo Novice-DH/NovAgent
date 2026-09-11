@@ -1,10 +1,10 @@
 """代码实现专家 Agent：手写 ReAct 循环在工作区内执行文件与 shell 操作。
 
 独立于 LangGraph 工作流（不接入 planner/actor/verifier），供上层编排按需
-调用：给定任务、指令、session 上下文与 memory 快照，模型在工作区内使用
-文件/shell 工具实现计划，并经 ``todo_update`` 工具显式汇报 todo 进度；
-``writer`` 实时接收 ``ai_message``/``tool_call``/``tool_result``/
-``final_answer`` 事件。
+调用：给定任务、指令、session 上下文与分层记忆（由 runtime 组装），模型
+在工作区内使用文件/shell 工具实现计划，并经 ``todo_update`` 工具显式汇报
+todo 进度；``writer`` 实时接收 ``memory``/``ai_message``/``tool_call``/
+``tool_result``/``final_answer`` 事件。
 """
 
 import json
@@ -13,6 +13,11 @@ from typing import Callable, Mapping, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
+from novagent.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+    memory_event,
+)
 from novagent.providers.openai_provider import create_model
 from novagent.tools.registry import build_tools
 from novagent.tools.todo_tools import create_todo_update_tool
@@ -44,9 +49,19 @@ DEFAULT_MAX_LOOPS = 10
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
 
 
-def build_memory_snapshot(state: Mapping) -> str:
-    """返回 layered memory 快照；预留接口，后续 memory 阶段实现真实快照。"""
-    return ""
+def _code_agent_input(state: Mapping, instruction: str, memory: dict) -> str:
+    """构造 codeAgent 的 HumanMessage：任务/指令/session 上下文 + 分层记忆 JSON。"""
+    task = str(state.get("task") or "")
+    session_context = str(state.get("session_context") or "")
+    human_text = (
+        f"Task: {task}\n\n"
+        f"Instruction: {instruction}\n\n"
+        "Session context:\n"
+        f"{session_context or '(no session context)'}"
+    )
+    return (
+        f"{human_text}\n\nLayered memory:\n{format_layered_memory_for_prompt(memory)}"
+    )
 
 
 def _response_text(response) -> str:
@@ -88,10 +103,12 @@ def run_code_agent(
 ) -> dict:
     """运行代码专家 ReAct 循环，返回实现摘要与 todo 进度。
 
-    ``state`` 为图状态样 dict-like 映射：``runtime``（``RuntimeState``，
+    ``state`` 为图状态样 dict-like 映射：``runtime``（``RuntimeState``,
     必需，缺失抛 ``ValueError``）约束工具的 workspace 根；``task``、
-    ``todos``、``session_context`` 可缺失。``writer`` 可调用时逐个接收
-    ``ai_message``/``tool_call``/``tool_result``/``final_answer`` 事件。
+    ``todos``、``session_context`` 可缺失。分层记忆由入口
+    ``build_layered_memory(state, node="codeAgent")`` 组装并拼接进首条
+    HumanMessage。``writer`` 可调用时逐个接收 ``memory``/``ai_message``/
+    ``tool_call``/``tool_result``/``final_answer`` 事件。
     ``model=None`` 时内部 ``create_model()``，可注入 FakeModel 离线测试。
     """
     runtime = state.get("runtime")
@@ -105,20 +122,10 @@ def run_code_agent(
     agent = model.bind_tools(tools)
     tool_map = {tool.name: tool for tool in tools}
 
-    task = str(state.get("task") or "")
-    session_context = str(state.get("session_context") or "")
-    memory_snapshot = build_memory_snapshot(state)
-    human_text = (
-        f"Task: {task}\n\n"
-        f"Instruction: {instruction}\n\n"
-        "Session context:\n"
-        f"{session_context or '(no session context)'}\n\n"
-        "Memory snapshot:\n"
-        f"{memory_snapshot or '(no memory snapshot)'}"
-    )
+    memory = build_layered_memory(state, node="codeAgent")
     messages = [
         SystemMessage(content=CODE_AGENT_PROMPT),
-        HumanMessage(content=human_text),
+        HumanMessage(content=_code_agent_input(state, instruction, memory)),
     ]
 
     todos = [dict(todo) for todo in state.get("todos") or []]
@@ -129,6 +136,9 @@ def run_code_agent(
         tool_events.append(event)
         if writer is not None:
             writer(event)
+
+    # 分层记忆事件先于本 Agent 所有其他事件。
+    emit(memory_event(memory, node="codeAgent"))
 
     last_ai_content = ""
     for _ in range(max_loops):

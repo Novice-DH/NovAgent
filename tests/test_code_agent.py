@@ -5,12 +5,13 @@ import json
 import pytest
 from langchain_core.messages import AIMessage, SystemMessage
 
-from novagent.agents.code_agent import (
-    CODE_AGENT_PROMPT,
-    build_memory_snapshot,
-    run_code_agent,
-)
+from novagent.agents import code_agent
+from novagent.agents.code_agent import CODE_AGENT_PROMPT, run_code_agent
 from novagent.core.state import RuntimeState
+from novagent.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+)
 
 
 class FakeModel:
@@ -63,12 +64,9 @@ def test_binds_build_tools_plus_todo_update(workspace):
 
 def test_message_construction_with_placeholders(workspace):
     model = FakeModel([AIMessage(content="ok.")])
+    state = _state(workspace, session_context="session notes here")
 
-    run_code_agent(
-        _state(workspace, session_context="session notes here"),
-        "implement it",
-        model=model,
-    )
+    run_code_agent(state, "implement it", model=model)
 
     system_message, human_message = model.calls[0]
     assert isinstance(system_message, SystemMessage)
@@ -76,12 +74,36 @@ def test_message_construction_with_placeholders(workspace):
     assert "demo task" in human_message.content
     assert "implement it" in human_message.content
     assert "session notes here" in human_message.content
-    assert "(no memory snapshot)" in human_message.content
+    assert "(no memory snapshot)" not in human_message.content
+    memory = build_layered_memory(state, node="codeAgent")
+    assert format_layered_memory_for_prompt(memory) in human_message.content
+    embedded = json.loads(
+        human_message.content.split("Layered memory:\n", 1)[1]
+    )
+    assert embedded["working_memory"]["node"] == "codeAgent"
+    assert embedded["working_memory"]["task"] == "demo task"
 
     model = FakeModel([AIMessage(content="ok.")])
     run_code_agent(_state(workspace), "again", model=model)
     human_message = model.calls[0][1]
     assert "(no session context)" in human_message.content
+
+
+def test_memory_event_comes_first(workspace):
+    events = []
+    model = FakeModel([AIMessage(content="ok.")])
+    state = _state(workspace)
+
+    result = run_code_agent(state, "do it", writer=events.append, model=model)
+
+    memory = build_layered_memory(state, node="codeAgent")
+    assert events[0] == {
+        "type": "memory",
+        "node": "codeAgent",
+        "memory": memory,
+    }
+    assert result["tool_events"][0] == events[0]
+    assert [event["type"] for event in events] == ["memory", "ai_message", "final_answer"]
 
 
 def test_react_loop_updates_todos_and_emits_events(workspace):
@@ -129,6 +151,7 @@ def test_react_loop_updates_todos_and_emits_events(workspace):
     assert tool_message.tool_call_id == "call_1"
     assert json.loads(tool_message.content)
     assert [event["type"] for event in result["tool_events"]] == [
+        "memory",
         "ai_message",
         "tool_call",
         "tool_result",
@@ -228,9 +251,9 @@ def test_runtime_is_required(workspace):
         run_code_agent({"task": "t"}, "i", model=FakeModel([]))
 
 
-def test_build_memory_snapshot_is_reserved_interface(workspace):
-    assert build_memory_snapshot(_state(workspace)) == ""
-    assert build_memory_snapshot({"anything": 1}) == ""
+def test_build_memory_snapshot_is_removed():
+    """预留接口已由 _code_agent_input 真实化，模块不再导出 build_memory_snapshot。"""
+    assert not hasattr(code_agent, "build_memory_snapshot")
 
 
 def test_prompt_constant():

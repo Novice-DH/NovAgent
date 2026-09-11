@@ -7,6 +7,10 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from novagent.core.state import RuntimeState
 from novagent.graph import nodes as graph_nodes
+from novagent.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+)
 from novagent.graph.nodes import (
     PLANNER_PROMPT,
     planner_node,
@@ -91,8 +95,9 @@ def test_planner_binds_three_tools(workspace):
 
 def test_planner_message_construction_first_run(workspace):
     model = FakeModel([AIMessage(content="done.")])
+    state = _state(workspace)
 
-    planner_node(_state(workspace), model=model)
+    planner_node(state, model=model)
 
     system_message, human_message = model.calls[0]
     assert isinstance(system_message, SystemMessage)
@@ -100,6 +105,13 @@ def test_planner_message_construction_first_run(workspace):
     assert PLANNER_PROMPT is stage3.PLANNER_PROMPT
     assert "demo task" in human_message.content
     assert "todo_write" in human_message.content
+    memory = build_layered_memory(state, node="planner")
+    assert format_layered_memory_for_prompt(memory) in human_message.content
+    embedded = json.loads(
+        human_message.content.split("Layered memory:\n", 1)[1]
+    )
+    assert embedded["working_memory"]["node"] == "planner"
+    assert embedded["working_memory"]["task"] == "demo task"
 
 
 def test_planner_message_construction_revise(workspace):
@@ -126,6 +138,26 @@ def test_planner_message_construction_revise(workspace):
     assert isinstance(human_message, HumanMessage)
     assert "boom" in human_message.content
     assert "fail.cmd" in human_message.content
+    memory = build_layered_memory(state, node="planner")
+    assert format_layered_memory_for_prompt(memory) in human_message.content
+    assert "Last error: boom" in human_message.content
+
+
+def test_planner_memory_event_comes_first(workspace):
+    events = []
+    model = FakeModel([AIMessage(content="done.")])
+    state = _state(workspace)
+
+    planner_node(state, model=model, on_event=events.append)
+
+    memory = build_layered_memory(state, node="planner")
+    assert events[0] == {
+        "type": "memory",
+        "node": "planner",
+        "memory": memory,
+    }
+    assert set(memory) == {"rules", "working_memory", "history_summary_store"}
+    assert [event["type"] for event in events][1:] == ["ai_message"]
 
 
 def test_planner_publishes_plan(workspace):
@@ -151,12 +183,14 @@ def test_planner_publishes_plan(workspace):
     assert update["acceptance_criteria"] == ["result exists"]
     assert update["verification_commands"] == ["python -c 'pass'"]
     assert [event["type"] for event in events] == [
+        "memory",
         "ai_message",
         "tool_call",
         "tool_result",
         "ai_message",
     ]
-    assert events[0] == {"type": "ai_message", "content": ""}
+    assert events[0]["node"] == "planner"
+    assert events[1] == {"type": "ai_message", "content": ""}
 
 
 def test_planner_delegates_search(workspace, monkeypatch):
@@ -379,6 +413,14 @@ def test_verifier_binds_four_tools(workspace):
     system_message, human_message = model.calls[0]
     assert system_message.content == stage3.VERIFIER_PROMPT
     assert "done" in human_message.content
+    assert "Acceptance criteria:" in human_message.content
+    memory = build_layered_memory(state, node="verifier")
+    assert format_layered_memory_for_prompt(memory) in human_message.content
+    embedded = json.loads(
+        human_message.content.split("Layered memory:\n", 1)[1]
+    )
+    assert embedded["working_memory"]["node"] == "verifier"
+    assert embedded["working_memory"]["task"] == "demo task"
 
 
 def test_verifier_sets_context_next_node_on_failure(workspace):
