@@ -15,6 +15,10 @@ from langchain_core.tools import StructuredTool
 from novagent.agents.code_agent import run_code_agent
 from novagent.agents.search_agent import run_search_agent
 from novagent.core.state import RuntimeState
+from novagent.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+)
 from novagent.graph.state import AgentHandoff, SourceItem
 from novagent.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 from novagent.providers.openai_provider import create_model
@@ -25,6 +29,8 @@ from novagent.tools.web_search_tool import WebSearchTool
 
 DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_CONTEXT_TOKEN_LIMIT = 400_000
+DEFAULT_CONTEXT_NEXT_NODE = "verifier"
 
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
 
@@ -493,3 +499,46 @@ def verifier_route(state: dict) -> str:
     if attempts >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS):
         return "final"
     return "planner"
+
+
+def _estimate_tokens(messages, model) -> int:
+    """优先用模型的 tokenizer 计数；不可用时按字符数粗估（约 4 字符/token）。"""
+    if model is not None:
+        try:
+            return int(model.get_num_tokens_from_messages(messages))
+        except Exception:  # noqa: BLE001 - 估算失败一律落入字符粗估
+            pass
+    text = "".join(_response_text(message) for message in messages)
+    return len(text) // 4
+
+
+def context_monitor_node(state: dict, *, model=None) -> dict:
+    """估算当前上下文 token 数并判定是否需要压缩（确定性节点，不调模型对话）。
+
+    计数输入为 ``messages + [memory_payload]``，其中 memory payload 为
+    分层记忆快照的 JSON 文本（复用 ``novagent.graph.memory``）。压缩判定
+    为严格大于 ``context_token_limit``（缺失默认 400000）；
+    ``context_next_node`` 由上游节点设置，本节点仅透传。
+    """
+    memory_payload = HumanMessage(
+        content=format_layered_memory_for_prompt(build_layered_memory(state))
+    )
+    counted = list(state.get("messages") or []) + [memory_payload]
+
+    token_count = _estimate_tokens(counted, model)
+    limit = state.get("context_token_limit") or DEFAULT_CONTEXT_TOKEN_LIMIT
+    return {
+        "context_token_count": token_count,
+        "context_should_compress": token_count > limit,
+        "context_next_node": state.get("context_next_node")
+        or DEFAULT_CONTEXT_NEXT_NODE,
+    }
+
+
+def context_monitor_route(state: dict) -> str:
+    """context monitor 之后的条件路由；``context_compressor`` 为后续压缩器 change 预留。"""
+    if state.get("passed"):
+        return "final"
+    if state.get("context_should_compress"):
+        return "context_compressor"
+    return state.get("context_next_node") or DEFAULT_CONTEXT_NEXT_NODE
