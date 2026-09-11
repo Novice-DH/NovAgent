@@ -1,0 +1,312 @@
+schema: comet.native.v4
+name: context-compressor
+language: zh-CN
+phase: archive
+status: done
+state_version: 13
+brief: brief.md
+shape_confirmation_hash: d294f340d368da9eaa6bdec5b177d7dfc69d947cc2acd0985b4aeb96c2aee32f
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/context-compressor
+  target_branch: main
+  finish: keep
+loop:
+  stage: done
+  goal_cycle: 2
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: 提示词常量 WHEN 导入 `novagent.prompts.stage4` THEN
+      `CONTEXT_COMPRESSION_PROMPT` 为非空 str AND 以 "You are the context_compressor
+      node in novagent stage 4." 开头 AND 同时含
+      "summary"、"active_goal"、"completed_work"、"open_todos"、"important_files"、"tool_findings"、"sources"、"next_steps"、"risks"
+      九个键名与 "Return only JSON with these keys"。'
+    result: passed
+    reason:
+      text: stage4.py CONTEXT_COMPRESSION_PROMPT 与 spec prompts.stage4 文本逐字一致（程序化
+        diff），含九键名与 Return only JSON with these keys。
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: 'A2: Scenario: 模型调用 WHEN 以含 messages 与任务状态的 state 调用
+      `context_compressor_node(state, model=FakeModel)` THEN 模型收到的消息恰为
+      `[SystemMessage, HumanMessage]` AND SystemMessage.content 为 stage4 的
+      `CONTEXT_COMPRESSION_PROMPT`（同一对象）AND HumanMessage.content
+      同时包含任务文本、全部旧消息内容与分层 memory JSON（含 `"working_memory"`）。'
+    result: passed
+    reason:
+      text: nodes.py:669-675 恰以 [SystemMessage(CONTEXT_COMPRESSION_PROMPT),
+        HumanMessage] 调用；human_text 含任务、全部旧消息 transcript 与含 working_memory 的分层
+        memory JSON。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: Scenario: 消息替换 WHEN LLM 返回合法 JSON（九键齐全）THEN 返回的 `messages` 恰含两个元素 AND
+      第一个是 `RemoveMessage` 且 `id == REMOVE_ALL_MESSAGES` AND 第二个是 `AIMessage` 且
+      `content` 为截断后的 `summary` 字段。"
+    result: passed
+    reason:
+      text: 返回 messages=[RemoveMessage(id=REMOVE_ALL_MESSAGES), AIMessage(截断后
+        summary)]，两元素、RemoveMessage 在前，两个分支的 summary 均经 _short_text 截断。
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: Scenario: 压缩状态字段 WHEN LLM 返回合法 JSON THEN `context_summary ==
+      summary`、`context_should_compress is False` AND `context_token_count`
+      为正整数且等于对压缩后 summary 的估算 token 数。"
+    result: passed
+    reason:
+      text: context_summary==summary、context_should_compress=False、context_token_count==_estimate_text_tokens(summary)（max(1,len//4)，空为
+        0）。
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Scenario: 持久化 WHEN 压缩完成 THEN workspace 根下存在 `HISTORY_SUMMARY.md` AND
+      文件内容含九个字段各自的小节与截断后文本（summary、active_goal、completed_work、open_todos、import\
+      ant_files、tool_findings、sources、next_steps、risks）。"
+    result: passed
+    reason:
+      text: "_persist_history_summary 以 UTF-8 写 runtime.workspace/HISTORY_SUMMARY.md，#
+        History Summary 标题加九个 ## 小节覆盖全部九字段；测试断言九字段文本齐全。"
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: 'A6: Scenario: 字段截断 WHEN `research_notes` 超过 1600 字符、`agent_handoffs` 超过 6
+      条、`summary` 超过 1600 字符 THEN 返回的 `research_notes` 长度 ≤ 1600 且以 "..." 结尾 AND
+      `agent_handoffs` 恰保留最近 6 条 AND `context_summary` 长度 ≤ 1600。'
+    result: passed
+    reason:
+      text: research_notes ≤1600 且以 ... 结尾；agent_handoffs 保序保留最近 6 条；context_summary
+        ≤1600；其余八键各 ≤800（COMPRESSION_DETAIL_LIMIT）。
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: 'A7: Scenario: 压缩事件 WHEN state 已有 `compression_events` 且发生压缩 THEN 返回的
+      `compression_events` 为既有事件追加一条新事件 AND 新事件 `node ==
+      "context_compressor"`、`token_count` 等于压缩前 transcript 的估算 token
+      数、`token_limit` 等于 state 的 `context_token_limit`、`summary` 非空、`created_at`
+      非空 AND `history_summary` 等于截断后的 summary。'
+    result: passed
+    reason:
+      text: 恰追加一条事件：node=context_compressor、token_count=formatted transcript
+        估算、token_limit=int(state 值 or 0)、reason/summary 非空、created_at 为 UTC
+        ISO；history_summary==_short_text(summary,2200)。
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: "A8: Scenario: 解析失败回退 WHEN LLM 返回无法解析为 JSON 的文本 THEN 节点不抛异常 AND 返回的
+      `messages[0]` 仍为 `RemoveMessage(id=REMOVE_ALL_MESSAGES)` AND `messages[1]`
+      为非空 `AIMessage`（内容来自既有消息的确定性回退）AND `HISTORY_SUMMARY.md` 仍被写入。"
+    result: passed
+    reason:
+      text: _parse_verifier_json 对不可解析文本返回 None 不抛异常；回退摘要取既有消息截断拼接、八键置空、RemoveMessage
+        仍在前、文件仍写入；测试覆盖。
+      truncated: false
+  - id: A9
+    source: brief.md
+    text: "A9: Scenario: 容错 WHEN state 缺少 `runtime` 或 `messages` THEN 节点不抛异常 AND
+      仍返回完整更新
+      dict（`messages`/`context_summary`/`context_token_count`/`context_should_c\
+      ompress`/`compression_events` 等键齐全），仅跳过文件持久化。"
+    result: passed
+    reason:
+      text: messages/runtime 均容错读取（or []/getattr None），transcript 空占位，跳过持久化，仍返回完整 10
+        键更新 dict；空 state 测试通过。
+      truncated: false
+  - id: A10
+    source: brief.md
+    text: "A10: Scenario: 现有行为不破坏 WHEN 在 change 工作区运行 `uv sync` THEN 成功且无新依赖、lock 一致
+      AND `uv run pytest` 全部通过（离线），既有
+      `tests/test_graph_nodes.py`、`tests/test_memory.py`、`tests/test_context_mo\
+      nitor.py` 等覆盖不回归。"
+    result: passed
+    reason:
+      text: git status 仅 nodes.py 修改、stage4.py
+        与测试为新增，workflow/state/memory/pyproject/uv.lock 未动；Verifier 第一手运行 uv run
+        pytest -q：124 passed 离线（含 9 项新测试），monitor 的 _estimate_tokens(messages,
+        model) 未被遮蔽。
+      truncated: false
+builder_handoff:
+  candidate_id: 53d87021-c942-4b83-93fd-9434dcd63521
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:4c10700c-ba5b-4d3d-8b09-1edd9a65496f
+  iteration: 1
+  summary:
+    text: 本轮新增 src/novagent/prompts/stage4.py（CONTEXT_COMPRESSION_PROMPT，逐字用户给定原文）并在
+      src/novagent/graph/nodes.py 末尾追加 context_compressor_node
+      及辅助（_COMPRESSION_FIELD_KEYS/_COMPRESSION_FIELD_TITLES/_estimate_text_tokens/_message_transcript/_fallback_summary/_persist_history_summary，常量
+      COMPRESSION_DETAIL_LIMIT=800）：调用
+      model.invoke([SystemMessage(CONTEXT_COMPRESSION_PROMPT),
+      HumanMessage(task+transcript+分层memory JSON)])，复用 _parse_verifier_json 解析九键
+      JSON（容忍代码围栏），解析失败回退为既有消息截断拼接（不抛异常）；summary 经 _short_text ≤1600、其余八键各
+      ≤800；返回 messages=[RemoveMessage(id=REMOVE_ALL_MESSAGES),
+      AIMessage(summary)]、context_summary、context_should_compress=False、context_token_count=压缩后字符估算（_estimate_text_tokens，区别于
+      monitor 的 _estimate_tokens(messages,
+      model)，无命名冲突）、research_notes(≤1600)/agent_handoffs(最近6条)/sources(仅title/url)/code_agent_summary(≤1000)
+      截断收敛、history_summary(≤2200)、compression_events 追加
+      CompressionEvent（node=context_compressor、token_count=压缩前 formatted
+      transcript 估算、token_limit=int(state 值 or 0)、created_at=UTC
+      ISO）；runtime.workspace 可用时把九字段写成 Markdown 小节覆盖
+      HISTORY_SUMMARY.md（UTF-8），runtime 缺失或 OSError 时跳过持久化。新增
+      tests/test_context_compressor.py 共 9
+      项离线测试（FakeCompressorModel，create_model 在容错用例中被 monkeypatch 为禁止调用）。本轮覆盖验收项
+      A1–A10 全部。开发期检查：uv sync 无新依赖（worktree 首次安装用既有 lock，uv.lock 未变更）、uv run
+      pytest 全量 124 项通过（离线，含既有 test_context_monitor.py 8 项无回归）、git status 核对仅
+      nodes.py 修改且 workflow.py/state.py/memory.py/pyproject/uv.lock 无改动。已知限制：真实
+      LLM 路径按项目约束仅以 FakeModel 离线覆盖；图接线（monitor/compressor 进 build_workflow）按确认
+      brief 属后续 change。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+  checks:
+    - name:
+        text: uv sync（依赖一致性）
+        truncated: false
+      result: passed
+      note:
+        text: worktree venv 依既有 uv.lock 安装，lock 与 pyproject 无变更、无新依赖
+        truncated: false
+    - name:
+        text: uv run pytest（全量离线）
+        truncated: false
+      result: passed
+      note:
+        text: 124 passed in 6.98s，含新增 tests/test_context_compressor.py 9 项与既有
+          test_context_monitor.py 8 项无回归
+        truncated: false
+    - name:
+        text: git status/diff 范围核对
+        truncated: false
+      result: passed
+      note:
+        text: 仅 src/novagent/graph/nodes.py 修改；新增 stage4.py
+          与测试文件；workflow.py/state.py/memory.py/pyproject.toml/uv.lock 无改动
+        truncated: false
+  checks_truncated: false
+  known_limits: []
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核执行（与 Builder 执行不同一）逐条核对 A1–A10：AST 级比对提示词与 spec
+        文本完全一致；消息构造、消息替换、状态字段、持久化九小节、截断上限、压缩事件结构、解析失败回退、缺 runtime/messages
+        容错全部符合；确认 diff 纯增量、_estimate_tokens(messages, model)
+        未被遮蔽、monitor/planner/verifier 无行为变化、无导入环、范围文件未动；无阻塞问题。
+      truncated: false
+    reviewer_execution_ref: review-agent-5a2ee3d3-context-compressor-iter1
+  submitted_at: 2026-09-11T03:58:05.598Z
+blockers: []
+verification:
+  candidate_id: 53d87021-c942-4b83-93fd-9434dcd63521
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:629c5b14-bea6-4fc5-a267-2b06b1f381be
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: uv-sync
+      name:
+        text: uv sync（依赖一致性）
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 76
+    - id: pytest-full
+      name:
+        text: uv run pytest（全量离线）
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 8089
+  summary:
+    text: 十项验收全部满足且有一手证据：提示词常量与 spec
+      文本程序化比对逐字一致；压缩节点的模型调用、消息替换、状态字段、持久化、截断、事件追加、解析回退与容错均在引用行号核验相符；范围干净（仅
+      nodes.py 修改加两个新文件），全量 124 项测试由 Verifier 独立重跑离线通过。残余关注点均为 spec
+      保证范围之外的轻微边界（非 int token limit、仅捕获 OSError 的持久化），不构成验收失败。
+    truncated: false
+  risks:
+    - text: nodes.py:689 int(state.get('context_token_limit') or 0) 对非数值字符串会抛
+        ValueError；spec 假定该字段为 int，风险低。
+      truncated: false
+    - text: _persist_history_summary 仅捕获 OSError（nodes.py:638）；非路径型 workspace 可能触发
+        TypeError，但 RuntimeState.workspace 类型为 Path。
+      truncated: false
+    - text: messages 为空且 LLM 输出不可解析时回退摘要为空字符串（空 AIMessage、token_count 0）；该组合不抛异常但未单测。
+      truncated: false
+    - text: context_compressor_node 按确认 spec 非目标未接入 build_workflow；图路由到压缩器属后续 change。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-11T04:04:37.356Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native Shape artifacts changed
+      truncated: false
+    completed_at: 2026-09-11T03:56:33.584Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 十项验收全部满足且有一手证据：提示词常量与 spec
+        文本程序化比对逐字一致；压缩节点的模型调用、消息替换、状态字段、持久化、截断、事件追加、解析回退与容错均在引用行号核验相符；范围干净（仅
+        nodes.py 修改加两个新文件），全量 124 项测试由 Verifier 独立重跑离线通过。残余关注点均为 spec
+        保证范围之外的轻微边界（非 int token limit、仅捕获 OSError 的持久化），不构成验收失败。
+      truncated: false
+    completed_at: 2026-09-11T04:04:37.356Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-11T03:41:45.162Z
