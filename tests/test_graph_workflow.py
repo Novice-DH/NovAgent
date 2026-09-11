@@ -242,10 +242,25 @@ def test_exhausted_budget_ends_via_context_monitor(workspace):
 
 def test_compression_branch_routes_through_compressor(workspace):
     ok_command = f'"{sys.executable}" -c "print(\'ok\')"'
+    compress_json = json.dumps(
+        {
+            "summary": "compressed summary",
+            "active_goal": "finish the task",
+            "completed_work": "wrote plan",
+            "open_todos": "t1",
+            "important_files": "result.txt",
+            "tool_findings": "",
+            "sources": "",
+            "next_steps": "verify",
+            "risks": "",
+        }
+    )
     fake = FakeModel(
         [
             _tool_call("todo_write", _plan_args([ok_command]), "c1"),
             AIMessage(content="Plan ready."),
+            # context_compressor：九键压缩摘要
+            AIMessage(content=compress_json),
             AIMessage(content=PASS_JSON),
         ]
     )
@@ -273,7 +288,11 @@ def test_compression_branch_routes_through_compressor(workspace):
         "context_monitor",
         "final",
     ]
-    assert compressor_update == {"context_should_compress": False}
+    assert compressor_update is not None
+    assert compressor_update["context_should_compress"] is False
+    assert compressor_update["context_summary"] == "compressed summary"
+    assert len(compressor_update["compression_events"]) == 1
+    assert compressor_update["compression_events"][0]["node"] == "context_compressor"
 
 
 def test_final_node_formats_success_and_failure():

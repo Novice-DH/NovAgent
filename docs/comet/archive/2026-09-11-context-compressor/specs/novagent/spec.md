@@ -68,15 +68,14 @@ src/novagent/
 
 - `stream_agent_events(task, *, workspace, max_attempts=3, model=None)` 为生成器：
   1. 创建 `RuntimeState(workspace)`；
-  2. `graph = build_complex_workflow(model=model)`；
+  2. `graph = build_workflow(model=model)`；
   3. `inputs = {"task": task, "runtime": state, "max_attempts": max_attempts}`；
   4. `for mode, payload in graph.stream(inputs, stream_mode=["updates", "custom"])`：
      - `mode == "custom"`：payload 为 planner 协调事件（含受托专家 Agent 的内部事件），转发时补 `"node": "planner"`；
      - `mode == "updates"`：payload 为 `{node_name: 更新dict}`，解析为 `{"type": "node_output", "node": ..., ...}` 事件：
        - `planner` → 携带 `plan_summary`、`todos`、`acceptance_criteria`、`verification_commands`；
        - `verifier` → 携带 `passed`、`reason`、`verification_results`、`verification_checks`；
-       - `final` → 携带 `final_answer`；
-       - `context_monitor`/`context_compressor` → 无对应解析分支，不产生事件。
+       - `final` → 携带 `final_answer`。
 - 统一事件格式：每个事件为普通 dict（值均可 JSON 序列化），至少含 `type`，并含 `node` 字段（"planner"/"verifier"/"final"）。
 
 ## graph.state — LangGraph 图共享状态
@@ -108,7 +107,7 @@ src/novagent/
   - `to_agent: str`
   - `instruction: str`
   - `result: str`
-- `CompressionEvent(TypedDict, total=False)`，字段与类型（一次上下文压缩事件的预留描述，`context_summary`/`compression_events` 的真实写入方属后续压缩器 change）：
+- `CompressionEvent(TypedDict, total=False)`，字段与类型（一次上下文压缩事件的预留描述，本 change 尚无写入方）：
   - `node: str`
   - `reason: str`
   - `token_count: int`
@@ -160,7 +159,7 @@ src/novagent/
 - `NovGraphState` 所有字段可选（`total=False`），图可以部分状态启动与更新；
 - `messages` 通道使用 `add_messages` reducer：图执行中对 `messages` 的更新按 LangGraph 语义追加/合并（如按消息 ID 去重更新），而不是整体覆盖；
 - 其余字段为默认覆盖语义的普通通道；
-- `context_summary`/`context_token_count`/`context_token_limit`/`context_should_compress`/`context_next_node`/`compression_events`/`memory_snapshot`/`history_summary` 为分层记忆与上下文压缩机制的承载字段：`memory_snapshot` 由 `build_layered_memory` 产出；`context_token_count`/`context_should_compress` 由 `context_monitor_node` 判定、压缩后由 `context_compressor_node` 写入；`context_next_node` 由 planner/verifier 上游设置（planner 后 `"verifier"`、verifier 失败后 `"planner"`）、`context_monitor_node` 透传；`context_summary`/`compression_events`/`history_summary` 由 `context_compressor_node` 写入（压缩机制第二步：压缩执行）。
+- `context_summary`/`context_token_count`/`context_token_limit`/`context_should_compress`/`context_next_node`/`compression_events`/`memory_snapshot`/`history_summary` 为分层记忆与上下文压缩机制的承载字段：`memory_snapshot` 由 `build_layered_memory` 产出（图内未写入，属预期）；`context_summary`/`context_token_count`/`context_should_compress`/`compression_events`/`history_summary` 由 `context_compressor_node` 写入（压缩机制第二步：压缩执行）；`context_should_compress` 的监控判定由 `context_monitor_node` 提供；`context_next_node` 由 `context_monitor_node` 透传。
 
 ## graph.memory — 三层 Memory 系统（Context Engineering 数据层）
 
@@ -312,7 +311,7 @@ Return only JSON with these keys:
 - risks
 ```
 
-## graph.nodes — 规划/执行/验证/监控/压缩/收尾节点与路由
+## graph.nodes — 规划/执行/验证/收尾节点与路由
 
 模块 `novagent.graph.nodes` 实现 LangGraph 节点函数与条件路由。节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通 dict 更新；`model=None` 时内部 `create_model()`，支持离线注入 FakeModel。提示词导入约定：`PLANNER_PROMPT`、`VERIFIER_PROMPT` 均从 `novagent.prompts.stage3` 导入（模块级名字与常量为同一对象）；`CONTEXT_COMPRESSION_PROMPT` 从 `novagent.prompts.stage4` 导入（同一对象）。模块内 `planner_node`/`verifier_node`/`final_node` 不导入、不调用 `novagent.graph.memory`（分层记忆的运行时接入属后续 change）；`context_monitor_node` 与 `context_compressor_node` 是例外（见下）。
 
@@ -324,26 +323,27 @@ Return only JSON with these keys:
   5. `todo_write` tool_call：从 args 提取 `plan_summary`、`todos`（补齐缺失键、非法 status 归一 `"pending"`）、`acceptance_criteria`、`verification_commands`（多次调用取最后一次）；
   6. `call_search_agent` tool_call（args `{instruction: str}`）：先发 `{"type": "handoff", "from": "planner", "to": "searchAgent", "instruction": ...}`，调用 `run_search_agent(<合并视图>, instruction, writer=writer, model=model)`（合并视图 = state 叠加本节点内已产生的 `todos`/`research_notes` 更新，`model` 为 planner 收到的注入模型，保证多次委托链式一致且可离线注入）；状态更新——`research_notes` 追加 agent summary（已有内容以空行连接）、`sources` 按 url 去重保序合并 `SourceItem`（从 ok 的 `search_results` 事件提取 title/url/content/score，无明细时仅 url）、`agent_handoffs` 追加 `{"from_agent": "planner", "to_agent": "searchAgent", "instruction", "result": <summary>}`；
   7. `call_code_agent` tool_call（args `{instruction: str}`）：先发 `{"type": "handoff", "from": "planner", "to": "codeAgent", "instruction": ...}`，调用 `run_code_agent(<合并视图>, instruction, writer=writer, model=model)`；状态更新——`todos` 取该次委托返回的 todos、`code_agent_summary` 为 agent summary、`agent_handoffs` 追加 `{"from_agent": "planner", "to_agent": "codeAgent", "instruction", "result"}`、`messages` 并入委托新增的 AIMessage/ToolMessage；
-  8. 返回更新 dict：计划四字段（发生 `todo_write` 时）+ `research_notes`/`sources`/`agent_handoffs`/`code_agent_summary`/`todos`/`messages`（发生对应委托时，仅包含有更新的键）+ `context_next_node`（恒为 `"verifier"`，每次返回都包含——上游设置约定：规划完成后进入验证）。
+  8. 返回更新 dict：计划四字段（发生 `todo_write` 时）+ `research_notes`/`sources`/`agent_handoffs`/`code_agent_summary`/`todos`/`messages`（发生对应委托时，仅包含有更新的键）。
 - `verifier_node(state, *, model=None) -> dict`：
   1. 从 `state["runtime"]` 取 `RuntimeState`（缺失抛 `ValueError`）；`tools = build_read_only_tools(runtime) + [create_bash_tool(runtime), WebSearchTool]`（恰 4 个：`read_file`/`grep`/`bash`/`web_search`）；
   2. 消息 `[SystemMessage(VERIFIER_PROMPT), HumanMessage(计划 + 验收标准 + 验证命令 + 最近执行输出)]`；ReAct 循环（同语义、`max_loops=10`，无事件上报）；「最近执行输出」取 `state.get("last_actor_summary", "")`——stage3 中该字段不再由图内节点产生、通常为空；bash 的只读性由提示词约束（安全检查），验证命令的程序化执行（下述第 4 步）保持不变，`web_search` 缺 `TAVILY_API_KEY` 时走既有错误降级；
   3. 最终 AI 文本解析 JSON `{passed, reason, checks, recommended_next_instruction}`（容忍代码围栏）；解析失败按判定失败处理；
   4. 同时用 `execute_command` 逐条运行 `verification_commands`（workspace 为 cwd，默认 30 秒超时），构造 `VerificationResult`：`ok = exit_code == 0`；超时/异常 → `exit_code=None`、`ok=False`、stderr 记录错误信息；
   5. 整体 `passed = llm_passed and all(command ok)`；
-  6. 返回更新：`passed`、`attempts`（原值 +1）、`verification_results`、`verification_checks`、`last_error`（失败时为 reason/命令失败/解析诊断，通过时为 `""`）、`final_answer`（整体通过时为 reason）、`todos`（整体通过 → 非 completed 全标 `completed`；失败 → in_progress 全标 `blocked`）；此外，未通过且自增后的 `attempts < max_attempts`（缺省 3）时返回另含 `context_next_node="planner"`（上游设置约定：失败回到规划修订），通过或预算耗尽时不包含该键（路由由 `context_monitor_route` 的 `passed`/预算判断优先终止）。
+  6. 返回更新：`passed`、`attempts`（原值 +1）、`verification_results`、`verification_checks`、`last_error`（失败时为 reason/命令失败/解析诊断，通过时为 `""`）、`final_answer`（整体通过时为 reason）、`todos`（整体通过 → 非 completed 全标 `completed`；失败 → in_progress 全标 `blocked`）。
 - `final_node(state) -> dict`：确定性节点（不调用 LLM、不修改 `passed`），返回更新仅含 `final_answer`：
   - `passed` 为真：成功格式文本 `"Task completed in <N> attempt(s). <reason>"`；
   - `passed` 为假：失败格式文本 `"Task failed after <N> attempt(s).\nLast error: <last_error>"`。
+- `verifier_route(state) -> str`：`state.get("passed")` 为真 → `"final"`；`state.get("attempts", 0) >= state.get("max_attempts", 3)` → `"final"`；否则 → `"planner"`。
 - `context_monitor_node(state, *, model=None) -> dict`：上下文监控节点（压缩机制第一步：token 监控）。确定性节点：不调用模型对话（`invoke`）、无网络、不写文件、不修改传入 state；`model=None` 时不构造模型（不调用 `create_model`）。
   1. 构造 memory payload：`memory_payload = HumanMessage(content=format_layered_memory_for_prompt(build_layered_memory(state)))`——`build_layered_memory` 与 `format_layered_memory_for_prompt` 从 `novagent.graph.memory` 导入（模块内唯一使用 `novagent.graph.memory` 的函数）；
   2. 计数输入 = `list(state.get("messages") or []) + [memory_payload]`；
   3. token 估算：`model is not None` 时调用 `model.get_num_tokens_from_messages(<计数输入>)`；`model` 为 None、模型无该方法（`AttributeError`）或调用抛出任何异常时，fallback 为 `len(text) // 4`——`text` 为计数输入全部消息文本内容的顺序拼接（消息文本取 `content` 为 str 时原样，非 str 时 `str(content)`）；
   4. 压缩判定：`limit = state.get("context_token_limit") or 400000`；`should_compress = token_count > limit`（严格大于，等于不触发）；
-  5. `context_next_node` 仅透传上游设置值（planner 后为 `"verifier"`，verifier 失败后为 `"planner"`；本节点不自行决策），缺失时取 `"verifier"`；
+  5. `context_next_node` 仅透传上游约定值（约定：planner 后设 `"verifier"`，verifier 失败后设 `"planner"`；本节点不自行决策），缺失时取 `"verifier"`；
   6. 返回更新恰为 `{"context_token_count": <int>, "context_should_compress": <bool>, "context_next_node": <str>}`。
-- `context_monitor_route(state) -> str`：上下文监控后的条件路由（由 `build_complex_workflow` 接线）：`state.get("passed")` 为真 → `"final"`（优先级最高）；`state.get("attempts", 0) >= state.get("max_attempts", 3)` → `"final"`（预算耗尽，先于压缩判定——无条件边直连 final，终止语义由本路由承担）；`state.get("context_should_compress")` 为真 → `"context_compressor"`；否则 → `state.get("context_next_node") or "verifier"`。
-- `context_compressor_node(state, *, model=None) -> dict`：上下文压缩节点（压缩机制第二步：压缩执行，`context_monitor_route` 路由目标 `"context_compressor"` 的落地，由 `build_complex_workflow` 接线）。`model=None` 时内部 `create_model()`；解析或持久化失败均不抛异常。
+- `context_monitor_route(state) -> str`：上下文监控后的条件路由（本 change 中暂未被 `build_workflow` 接线，路由目标 `"context_compressor"` 为后续压缩器 change 预留）：`state.get("passed")` 为真 → `"final"`（优先级最高）；`state.get("context_should_compress")` 为真 → `"context_compressor"`；否则 → `state.get("context_next_node") or "verifier"`。
+- `context_compressor_node(state, *, model=None) -> dict`：上下文压缩节点（压缩机制第二步：压缩执行，`context_monitor_route` 路由目标 `"context_compressor"` 的落地；本 change 中未接入 `build_workflow`）。`model=None` 时内部 `create_model()`；解析或持久化失败均不抛异常。
   1. memory 快照：`memory = build_layered_memory(state, node="context_compressor")`，`memory_text = format_layered_memory_for_prompt(memory)`（复用 `novagent.graph.memory`）；
   2. transcript：把 `state.get("messages") or []` 逐条格式化为 `序号. [type] content`（`type` 为消息类 langchain type 标识，`content` 为 str 原样、非 str 转 str），空消息列表时 transcript 为空占位文本；
   3. 模型调用：`response = model.invoke([SystemMessage(CONTEXT_COMPRESSION_PROMPT), HumanMessage(human_text)])`，`human_text` 依次含任务（`state.get("task", "")`）、transcript 与 memory 快照 JSON（`memory_text`）；响应文本提取与 `graph.nodes` 同语义（content 为 str 原样，非 str 转 str）；
@@ -357,20 +357,19 @@ Return only JSON with these keys:
      - `"history_summary": _short_text(截断后 summary, 2200)`；
      - `"compression_events": list(state.get("compression_events") or []) + [新事件]`，新事件恰为 `CompressionEvent` 结构：`node="context_compressor"`、`reason`（非空说明文本）、`token_count=<压缩前估算>`、`token_limit=int(state.get("context_token_limit") or 0)`、`summary=<截断后 summary>`、`created_at=datetime.now(timezone.utc).isoformat()`；
   8. 持久化：`runtime = state.get("runtime")`；`runtime` 非 None 且 `workspace` 可用时，把九个截断后字段写成 Markdown（`# History Summary` 标题 + 各字段 `##` 小节）覆盖写入 `Path(runtime.workspace) / "HISTORY_SUMMARY.md"`（UTF-8）；`runtime` 缺失或写入抛 `OSError` 时跳过持久化，不影响返回值。
-- `context_compressor_route(state) -> str`：`state.get("context_next_node") or "verifier"`。
 
 ## graph.workflow — LangGraph 工作流组装
 
 模块 `novagent.graph.workflow` 组装可执行的 stage3 工作流：
 
-- `build_complex_workflow(*, model=None)`（唯一构建函数；旧 `build_workflow` 已移除）：
+- `build_workflow(*, model=None)`：
   - `graph = StateGraph(NovGraphState)`；
-  - 注册节点：`"planner"` → 图内包装——经 `functools.partial` 绑定注入的 `model`，执行时调用 `langgraph.config.get_stream_writer()`，把每个事件复制并补 `"node": "planner"` 后作为 `on_event` 传给 `planner_node`（协调事件进入 custom 流；`invoke()` 等不消费 custom 流的场景下 writer 静默丢弃）；`"context_monitor"` → `context_monitor_node`（经 `functools.partial` 绑定注入的 `model`，供精确 token 估算）；`"context_compressor"` → `context_compressor_node`（经 `functools.partial` 绑定注入的 `model`，供压缩摘要；`model=None` 时节点内部 `create_model()`）；`"verifier"` → `verifier_node`（经 `functools.partial` 绑定注入的 `model`）；`"final"` → `final_node`；不注册 `"actor"`；
-  - 边：`START → "planner"`、`"planner" → "context_monitor"`、`"verifier" → "context_monitor"`、`"final" → END`；
-  - `"context_monitor"` 经 `context_monitor_route` 条件边路由：`{"context_compressor": "context_compressor", "verifier": "verifier", "planner": "planner", "final": "final"}`；
-  - `"context_compressor"` 经 `context_compressor_route` 条件边路由：`{"verifier": "verifier", "planner": "planner", "final": "final"}`；
+  - 注册节点：`"planner"` → 图内包装——经 `functools.partial` 绑定注入的 `model`，执行时调用 `langgraph.config.get_stream_writer()`，把每个事件复制并补 `"node": "planner"` 后作为 `on_event` 传给 `planner_node`（协调事件进入 custom 流；`invoke()` 等不消费 custom 流的场景下 writer 静默丢弃）；`"verifier"` → `verifier_node`（经 `functools.partial` 绑定注入的 `model`）；`"final"` → `final_node`；不注册 `"actor"`，也不注册 `"context_monitor"`/`"context_compressor"`（monitor 与 compressor 的图接线属后续 change）；
+  - 边：`START → "planner"`、`"planner" → "verifier"`；
+  - `"verifier"` 经 `verifier_route` 条件边路由：`{"final": "final", "planner": "planner"}`；
+  - `"final" → END`；
   - 返回 `graph.compile()`。
-- 图拓扑恰为：START → planner → context_monitor；context_monitor →（通过或预算耗尽）final，或 →（应压缩）context_compressor，或 →（否则）`context_next_node`；context_compressor →（`context_next_node`）verifier/planner/final；verifier → context_monitor；final → END。
+- 图拓扑恰为：START → planner → verifier →（通过或预算耗尽）final → END，或 verifier →（未通过且预算未耗尽）planner。
 - 本模块不提供 CLI 入口。
 
 ## agents.search_agent — 搜索专家 Agent
@@ -534,12 +533,12 @@ Rules:
 ## tests
 
 - `tests/test_context_compressor.py` 新增（FakeModel 离线测试，不发起网络请求）：`CONTEXT_COMPRESSION_PROMPT` 为 stage4 同一对象且含九个键名与 "Return only JSON with these keys"；模型调用消息恰为 `[SystemMessage(CONTEXT_COMPRESSION_PROMPT), HumanMessage]` 且 HumanMessage 同时含任务、全部旧消息内容与分层 memory JSON（`"working_memory"`）；合法 JSON 响应 → `messages` 恰两元素（`RemoveMessage(id=REMOVE_ALL_MESSAGES)` + 截断后 summary 的 `AIMessage`）、`context_summary == summary`、`context_should_compress is False`、`context_token_count` 等于压缩后估算；`HISTORY_SUMMARY.md` 写入 workspace 根且含九字段小节；截断——超长 `research_notes`（≤1600 且 "..." 结尾）、超 6 条 `agent_handoffs`、超长 `summary`（`context_summary` ≤1600）；`compression_events` 追加新事件（`node="context_compressor"`、`token_count`=压缩前估算、`token_limit` 取 state 值、`created_at` 非空）且 `history_summary` 等于截断后 summary；解析失败回退——不抛异常、`RemoveMessage` 仍在、`AIMessage` 非空、文件仍写入；容错——缺 `runtime`/`messages` 时返回完整更新 dict 且跳过持久化；
-- `tests/test_context_monitor.py` 保持并扩展（离线测试，不发起网络请求）：精确估算——注入实现 `get_num_tokens_from_messages` 的假模型（返回固定值并记录入参），断言返回恰三键、`context_token_count` 为模型返回值、计数输入恰为 `messages + [memory_payload]`（长度 +1）且末项为 `HumanMessage`、文本可 `json.loads` 并与 `format_layered_memory_for_prompt(build_layered_memory(state))` 一致；fallback——`model=None` 时结果为文本拼接长度整除 4 且不调用 `create_model`，注入抛 `RuntimeError` 的假模型同样容错落入 fallback；阈值判定——`token_count` 等于 `context_token_limit` 时不压缩、超过时压缩、`context_token_limit` 缺失默认 400000；`context_next_node` 透传（state 有值透传、缺失默认 `"verifier"`）；`context_monitor_route` 优先级——`passed` → `"final"`（即使应压缩）、应压缩 → `"context_compressor"`、否则透传 `context_next_node`、预算耗尽 → `"final"`（优先级位于 `passed` 之后、`should_compress` 之前）；纯函数性——不修改传入 state；`context_compressor_route` 四取值映射（`"planner"`/`"verifier"`/`"final"` 透传、缺失默认 `"verifier"`）；压缩器节点的行为覆盖由 `tests/test_context_compressor.py` 承担；
+- `tests/test_context_monitor.py` 保持（离线测试，不发起网络请求）：精确估算——注入实现 `get_num_tokens_from_messages` 的假模型（返回固定值并记录入参），断言返回恰三键、`context_token_count` 为模型返回值、计数输入恰为 `messages + [memory_payload]`（长度 +1）且末项为 `HumanMessage`、文本可 `json.loads` 并与 `format_layered_memory_for_prompt(build_layered_memory(state))` 一致；fallback——`model=None` 时结果为文本拼接长度整除 4 且不调用 `create_model`，注入抛 `RuntimeError` 的假模型同样容错落入 fallback；阈值判定——`token_count` 等于 `context_token_limit` 时不压缩、超过时压缩、`context_token_limit` 缺失默认 400000；`context_next_node` 透传（state 有值透传、缺失默认 `"verifier"`）；`context_monitor_route` 优先级——`passed` → `"final"`（即使应压缩）、应压缩 → `"context_compressor"`、否则透传 `context_next_node`；纯函数性——不修改传入 state；
 - `tests/test_memory.py` 保持（纯函数离线测试，不调用模型、不发起网络请求）：`RULES_LAYER` 常量结构（scope/storage/5 条规则逐字）；`build_layered_memory` 返回恰含三层且 `working_memory` 16 键、`history_summary_store` 8 键齐全；workspace 有/无 `NOTEPAD.md` 与 `HISTORY_SUMMARY.md` 时 `read_notepad`/`read_history_summary` 的 exists/content 行为（缺失不抛异常）；`_short_text` 截断（结果 ≤ limit 且以 "..." 结尾）与短文本原样；`_trim_handoffs` 超 6 条保留最近 6 条且顺序保持；`sources` 收敛为仅 title/url；`context_summary` 截断与 `compression_events` 最近 3 条；`format_layered_memory_for_prompt` 返回可 `json.loads` 且与输入相等；`NovGraphState` 含 8 个新字段；空 state 容错（不抛异常、占位值正确）；
-- `tests/test_agent_loop.py` 保持 stage3 协调语义覆盖（FakeModel 离线经 `stream_agent_events` 驱动新图）：通过路径（planner 轮 1 `todo_write` 发布计划、轮 2 `call_code_agent` 委托实现、轮 3 纯文本结束 → verifier 输出 `passed=true` JSON → final），事件顺序（planner `node_output` → planner 内部事件（带 `node="planner"`，含 `handoff`）→ verifier `node_output` → final `node_output`——`context_monitor`/`context_compressor` 不产生统一事件），`final_answer` 以 "Task completed" 开头，文件落盘；失败回环（verifier 首轮失败 → `context_next_node="planner"` 经 context_monitor 回 planner，收到含 `last_error` 的修订 HumanMessage 后 `todo_write` 修订，最终通过；全程无 `GraphRecursionError`）；`max_attempts=1` 预算耗尽经 context_monitor 直接 final（"Task failed"）；
+- `tests/test_agent_loop.py` 保持 stage3 协调语义覆盖（FakeModel 离线驱动整图）：通过路径（planner 轮 1 `todo_write` 发布计划、轮 2 `call_code_agent` 委托实现、轮 3 纯文本结束 → verifier 输出 `passed=true` JSON → final），事件顺序（planner `node_output` → planner 内部事件（带 `node="planner"`，含 `handoff`）→ verifier `node_output` → final `node_output`），`final_answer` 以 "Task completed" 开头，文件落盘；失败回环（planner 收到含 `last_error` 的修订 HumanMessage 后 `todo_write` 修订，最终通过）；`max_attempts=1` 预算耗尽直接 final；
 - `tests/test_cli.py`：`--help` 含 `--max-attempts` 与 `--workspace`；workspace 自动创建与缺 key 清晰报错（退出码 1）；统一事件格式的 fake 流驱动 CLI 渲染——输出依次包含 📋 Planner、🔧 Actor、✅ Verifier、📝 Final 与工具详情、最终回答；fake 断言 `--max-attempts` 默认 3 与显式传值生效；
-- `tests/test_graph_nodes.py` 更新：planner 绑定工具恰为 `["todo_write", "call_search_agent", "call_code_agent"]`；消息构造（首次生成与含 `last_error` 的修订 HumanMessage）；`todo_write` 计划归一化与多次调用取最后一次；委托语义——`call_search_agent`/`call_code_agent` 先发 `handoff` 事件再调 `run_search_agent`/`run_code_agent`，状态更新（`research_notes` 追加、`sources` 按 url 去重保序、`agent_handoffs` 记录、`code_agent_summary`、`todos`、`messages`）；循环边界；planner 返回恒含 `context_next_node="verifier"`；`novagent.graph.nodes` 不含 `actor_node` 且不再提供 `verifier_route`；verifier 断言（`VERIFIER_PROMPT` 为 stage3 同一对象、绑定工具恰 4 个 read_file/grep/bash/web_search）新增：失败且自增后 `attempts < max_attempts` 返回含 `context_next_node="planner"`、通过时不含该键；
-- `tests/test_graph_workflow.py` 更新：编译图（`build_complex_workflow()`）节点集合恰为 `{"planner", "context_monitor", "context_compressor", "verifier", "final"}`，`START → planner`、`planner → context_monitor`、`verifier → context_monitor`、context_monitor 条件边恰四目标（context_compressor/verifier/planner/final）、context_compressor 条件边恰三目标（verifier/planner/final）、`final → END`；`novagent.graph.workflow` 不再提供 `build_workflow`；planner 桥接事件带 `node="planner"`；端到端 verifier 绑定恰为 `["read_file", "grep", "bash", "web_search"]`；updates 流执行序列断言——成功路径恰为 planner→context_monitor→verifier→context_monitor→final，预算耗尽（`max_attempts=1`）同序终止于 final，压缩路径（`context_token_limit=1`）恰为 planner→context_monitor→context_compressor→verifier→context_monitor→final，且 FakeModel 额外提供一轮压缩摘要响应、compressor 更新含 `"context_should_compress": False` 与 `context_summary`/`compression_events`（真实压缩器语义，逐键断言由 `tests/test_context_compressor.py` 承担）；
-- `tests/test_graph_state.py` 保持：`NovGraphState` 8 个 context/memory 字段与 `CompressionEvent`/`LayeredMemory` 类型，`add_messages` 语义不变；
+- `tests/test_graph_nodes.py` 保持：planner 绑定工具恰为 `["todo_write", "call_search_agent", "call_code_agent"]`；消息构造（首次生成与含 `last_error` 的修订 HumanMessage）；`todo_write` 计划归一化与多次调用取最后一次；委托语义——`call_search_agent`/`call_code_agent` 先发 `handoff` 事件再调 `run_search_agent`/`run_code_agent`，状态更新（`research_notes` 追加、`sources` 按 url 去重保序、`agent_handoffs` 记录、`code_agent_summary`、`todos`、`messages`）；循环边界；`novagent.graph.nodes` 不含 `actor_node`；verifier 断言（`VERIFIER_PROMPT` 为 stage3 同一对象、绑定工具恰 4 个 read_file/grep/bash/web_search）；
+- `tests/test_graph_workflow.py` 保持：编译图节点集合恰为 `{"planner", "verifier", "final"}`，`START → planner`、`planner → verifier`、verifier 条件边、`final → END`；planner 桥接事件带 `node="planner"`；端到端 verifier 绑定恰为 `["read_file", "grep", "bash", "web_search"]`；
+- `tests/test_graph_state.py` 更新：`NovGraphState` 新增 8 字段（`context_summary`/`context_token_count`/`context_token_limit`/`context_should_compress`/`context_next_node`/`compression_events`/`memory_snapshot`/`history_summary`）与 `CompressionEvent`/`LayeredMemory` 类型，`add_messages` 语义不变；
 - `tests/test_web_search_tool.py`、`tests/test_search_agent.py`、`tests/test_code_agent.py`、`tests/test_registry.py`、`tests/test_file_tools.py`、`tests/test_grep_tool.py`、`tests/test_bash_tool.py`、`tests/test_paths.py`、`tests/test_openai_provider.py` 保持既有覆盖；
 - 全部测试离线运行，不发起真实网络请求。

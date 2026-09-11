@@ -6,21 +6,38 @@ dict 更新。planner 的协调事件（含受托专家 Agent 的内部事件）
 """
 
 import json
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.tools import StructuredTool
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from novagent.agents.code_agent import run_code_agent
 from novagent.agents.search_agent import run_search_agent
 from novagent.core.state import RuntimeState
 from novagent.graph.memory import (
+    CODE_AGENT_SUMMARY_LIMIT,
+    CONTEXT_SUMMARY_LIMIT,
+    HISTORY_SUMMARY_LIMIT,
+    RESEARCH_NOTES_LIMIT,
+    _norm_sources,
+    _short_text,
+    _trim_handoffs,
     build_layered_memory,
     format_layered_memory_for_prompt,
 )
 from novagent.graph.state import AgentHandoff, SourceItem
 from novagent.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
+from novagent.prompts.stage4 import CONTEXT_COMPRESSION_PROMPT
 from novagent.providers.openai_provider import create_model
 from novagent.tools.bash_tool import create_bash_tool, execute_command
 from novagent.tools.registry import build_read_only_tools
@@ -31,6 +48,9 @@ DEFAULT_MAX_LOOPS = 10
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_CONTEXT_TOKEN_LIMIT = 400_000
 DEFAULT_CONTEXT_NEXT_NODE = "verifier"
+
+# 压缩摘要九键中除 summary 外各字段的截断上限
+COMPRESSION_DETAIL_LIMIT = 800
 
 _VALID_STATUS = {"pending", "in_progress", "completed", "blocked"}
 
@@ -546,13 +566,157 @@ def context_monitor_route(state: dict) -> str:
     return state.get("context_next_node") or DEFAULT_CONTEXT_NEXT_NODE
 
 
-def context_compressor_node(state: dict) -> dict:
-    """上下文压缩占位节点：仅清除压缩标记，真实压缩逻辑属后续 change。
+_COMPRESSION_FIELD_KEYS = (
+    "active_goal",
+    "completed_work",
+    "open_todos",
+    "important_files",
+    "tool_findings",
+    "sources",
+    "next_steps",
+    "risks",
+)
 
-    确定性节点：不调模型对话、不构造模型、无网络、不写文件、不修改
-    传入 state。
+_COMPRESSION_FIELD_TITLES = {
+    "summary": "Summary",
+    "active_goal": "Active Goal",
+    "completed_work": "Completed Work",
+    "open_todos": "Open Todos",
+    "important_files": "Important Files",
+    "tool_findings": "Tool Findings",
+    "sources": "Sources",
+    "next_steps": "Next Steps",
+    "risks": "Risks",
+}
+
+
+def _estimate_text_tokens(text) -> int:
+    """按字符数粗估 token（约 4 字符/token）；空文本为 0。
+
+    与 monitor 的 ``_estimate_tokens(messages, model)`` 区分：本函数只面向
+    纯文本，供压缩节点估算压缩前后规模，不引入 tokenizer 依赖。
     """
-    return {"context_should_compress": False}
+    value = str(text or "")
+    if not value:
+        return 0
+    return max(1, len(value) // 4)
+
+
+def _message_transcript(messages) -> str:
+    """把消息列表格式化为 ``序号. [type] content`` 的多行文本。"""
+    lines = []
+    for index, message in enumerate(messages, start=1):
+        kind = getattr(message, "type", "message")
+        lines.append(f"{index}. [{kind}] {_response_text(message)}")
+    return "\n".join(lines)
+
+
+def _fallback_summary(messages) -> str:
+    """LLM 响应不可解析时的确定性回退摘要：既有消息文本的截断拼接。"""
+    text = "\n".join(_response_text(message) for message in messages)
+    return _short_text(text, CONTEXT_SUMMARY_LIMIT)
+
+
+def _persist_history_summary(workspace, summary: str, fields: dict) -> None:
+    """把九个截断后的压缩字段写成 Markdown 小节；失败静默跳过。"""
+    lines = [
+        "# History Summary",
+        "",
+        f"Compressed by context_compressor_node at "
+        f"{datetime.now(timezone.utc).isoformat()}.",
+        "",
+    ]
+    keyed_fields = {"summary": summary, **fields}
+    for key, title in _COMPRESSION_FIELD_TITLES.items():
+        lines.append(f"## {title}")
+        lines.append(keyed_fields.get(key) or "(empty)")
+        lines.append("")
+    try:
+        (Path(workspace) / "HISTORY_SUMMARY.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def context_compressor_node(state: dict, *, model=None) -> dict:
+    """用 LLM 把消息历史压缩为结构化摘要并重置消息窗口。
+
+    计数输入为当前全部消息与分层记忆快照；LLM 返回九键 JSON（容忍代码
+    围栏），解析失败时回退为既有消息的截断拼接。压缩后以
+    ``RemoveMessage(id=REMOVE_ALL_MESSAGES) + AIMessage(summary)`` 替换
+    消息历史，九字段截断后持久化到 ``HISTORY_SUMMARY.md``，并追加一条
+    ``CompressionEvent``；解析或持久化失败均不抛异常。
+    """
+    if model is None:
+        model = create_model()
+
+    messages = list(state.get("messages") or [])
+    transcript = _message_transcript(messages)
+    memory_text = format_layered_memory_for_prompt(
+        build_layered_memory(state, node="context_compressor")
+    )
+
+    human_text = (
+        f"Task: {state.get('task') or ''}\n\n"
+        f"Current messages:\n{transcript or '(no messages)'}\n\n"
+        f"Layered memory snapshot (JSON):\n{memory_text}"
+    )
+    response = model.invoke(
+        [
+            SystemMessage(content=CONTEXT_COMPRESSION_PROMPT),
+            HumanMessage(content=human_text),
+        ]
+    )
+
+    parsed = _parse_verifier_json(_response_text(response))
+    if parsed is None:
+        summary = _fallback_summary(messages)
+        fields = {key: "" for key in _COMPRESSION_FIELD_KEYS}
+    else:
+        summary = _short_text(
+            str(parsed.get("summary") or ""), CONTEXT_SUMMARY_LIMIT
+        )
+        fields = {
+            key: _short_text(str(parsed.get(key) or ""), COMPRESSION_DETAIL_LIMIT)
+            for key in _COMPRESSION_FIELD_KEYS
+        }
+
+    compression_events = list(state.get("compression_events") or [])
+    compression_events.append(
+        {
+            "node": "context_compressor",
+            "reason": "context window compressed for resume",
+            "token_count": _estimate_text_tokens(transcript),
+            "token_limit": int(state.get("context_token_limit") or 0),
+            "summary": summary,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    workspace = getattr(state.get("runtime"), "workspace", None)
+    if workspace is not None:
+        _persist_history_summary(workspace, summary, fields)
+
+    return {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            AIMessage(content=summary),
+        ],
+        "context_summary": summary,
+        "context_token_count": _estimate_text_tokens(summary),
+        "context_should_compress": False,
+        "research_notes": _short_text(
+            state.get("research_notes") or "", RESEARCH_NOTES_LIMIT
+        ),
+        "agent_handoffs": _trim_handoffs(state.get("agent_handoffs") or []),
+        "sources": _norm_sources(state.get("sources") or []),
+        "code_agent_summary": _short_text(
+            state.get("code_agent_summary") or "", CODE_AGENT_SUMMARY_LIMIT
+        ),
+        "history_summary": _short_text(summary, HISTORY_SUMMARY_LIMIT),
+        "compression_events": compression_events,
+    }
 
 
 def context_compressor_route(state: dict) -> str:

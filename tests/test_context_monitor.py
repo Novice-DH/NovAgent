@@ -185,17 +185,6 @@ def test_route_passed_beats_budget_and_compression():
     )
 
 
-def test_compressor_node_placeholder(monkeypatch):
-    monkeypatch.setattr(graph_nodes, "create_model", _forbidden_create_model)
-    state = _state(context_should_compress=True, context_next_node="planner")
-    snapshot = json.dumps(state, sort_keys=True, default=str)
-
-    result = graph_nodes.context_compressor_node(state)
-
-    assert result == {"context_should_compress": False}
-    assert json.dumps(state, sort_keys=True, default=str) == snapshot
-
-
 def test_compressor_route():
     assert (
         graph_nodes.context_compressor_route(_state(context_next_node="planner"))

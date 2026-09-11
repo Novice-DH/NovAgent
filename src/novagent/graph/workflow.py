@@ -39,7 +39,7 @@ def build_complex_workflow(*, model=None):
 
     graph.add_node("planner", _planner)
     graph.add_node("context_monitor", partial(context_monitor_node, model=model))
-    graph.add_node("context_compressor", context_compressor_node)
+    graph.add_node("context_compressor", partial(context_compressor_node, model=model))
     graph.add_node("verifier", partial(verifier_node, model=model))
     graph.add_node("final", final_node)
 
