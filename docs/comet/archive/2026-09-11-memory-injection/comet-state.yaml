@@ -1,0 +1,280 @@
+schema: comet.native.v4
+name: memory-injection
+language: zh-CN
+phase: archive
+status: done
+state_version: 10
+brief: brief.md
+shape_confirmation_hash: 94be0fc59ce77c2bdf0280eea9d2a60713f4cb8e1f0e3921cc57ad77c8760225
+spec_changes:
+  - capability: novagent
+    operation: modify
+    source: specs/novagent/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/memory-injection
+  target_branch: main
+  finish: merge
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: 'A1: Scenario: memory_event 形状 WHEN 调用 `memory_event(memory,
+      node="planner")` THEN 返回 dict 恰为 `{"type": "memory", "node": "planner",
+      "memory": <传入的同一 memory>}` AND 缺省 node 时为 `"graph"`。'
+    result: passed
+    reason:
+      text: memory.py:174-176 返回恰为 {type,node,memory}；python -c 验证缺省 node=graph 且
+        memory 为同一对象；test_memory.py:293-298 通过
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: 'A2: Scenario: planner 注入 WHEN 以 FakeModel 分别驱动 `planner_node` 的首轮（无
+      todos）与修订（todos + `last_error`）输入 THEN 捕获的首条 HumanMessage 分别以首轮指令文本（`Task:
+      ...`）与修订文本（含 `Last error:` 与失败验证）开头 AND 消息包含
+      `format_layered_memory_for_prompt(memory)` 的完整 JSON，`json.loads` 后
+      `working_memory.node == "planner"` 且 `working_memory.task` 与 state 一致。'
+    result: passed
+    reason:
+      text: "nodes.py:45-70/122-124/251-254；独立 FakeModel 驱动首轮 Task: 开头、修订含 Last error:
+        与 fail.cmd，末尾 JSON 解析 node=planner task 一致；test_graph_nodes.py:97-144
+        通过"
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: 'A3: Scenario: planner memory 事件 WHEN 以 FakeModel 驱动 `planner_node` 并收集
+      `on_event` 事件 THEN 第一条事件为 `{"type": "memory", "node": "planner", "memory":
+      <三层结构>}` 且先于任何 `ai_message`。'
+    result: passed
+    reason:
+      text: nodes.py:122-124 先于所有事件；test_graph_nodes.py:147-161 events[0] 为 memory 且后随
+        ai_message；test_agent_loop.py:104-114 首条 planner 事件为 memory
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: 'A4: Scenario: codeAgent 注入 WHEN 以 FakeModel 驱动 `run_code_agent` THEN
+      捕获的首条 HumanMessage 含 Task/Instruction/Session context 段 AND 含分层记忆 JSON（解析后
+      `working_memory.node == "codeAgent"`）AND 不包含 `(no memory snapshot)`。'
+    result: passed
+    reason:
+      text: code_agent.py:52-64/125-129；独立驱动含 Task/Instruction/Session context、无 (no
+        memory snapshot)、JSON node=codeAgent；grep 零残留；test_code_agent.py:65-89
+        通过
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: 'A5: Scenario: codeAgent memory 事件 WHEN 以 FakeModel 驱动 `run_code_agent`
+      并以列表收集 `writer` THEN 第一条事件为 memory 事件（解析后 `working_memory.node ==
+      "codeAgent"`）AND 同一事件位于返回 `tool_events` 首位。'
+    result: passed
+    reason:
+      text: code_agent.py:135-141 emit 首发 memory 事件；独立驱动 writer 首事件与 tool_events[0]
+        同一；test_code_agent.py:92-106 通过
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: 'A6: Scenario: verifier 注入 WHEN 以 FakeModel 驱动 `verifier_node` THEN 捕获的首条
+      HumanMessage 含既有验收文本（Task / Plan summary / Acceptance criteria /
+      Verification commands）AND 含分层记忆 JSON（解析后 `working_memory.node ==
+      "verifier"`）AND `verifier_node` 签名不变（无事件参数）。'
+    result: passed
+    reason:
+      text: nodes.py:307-322/325/338-341；inspect 确认签名 (state,*,model=None)
+        无事件参数；独立驱动验收文本齐全且 JSON node=verifier；test_graph_nodes.py:391-423 通过
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: "A7: Scenario: 预留接口移除 WHEN 检查 `novagent.agents.code_agent` 模块 THEN 不存在
+      `build_memory_snapshot` 属性。"
+    result: passed
+    reason:
+      text: python -c hasattr 为 False；grep src/ 零匹配；test_code_agent.py:254-256 通过
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: "A8: Scenario: searchAgent 保持 WHEN 以 FakeModel 驱动 `run_search_agent` THEN
+      其首条 HumanMessage 不包含分层记忆 JSON（行为与现状一致）。"
+    result: passed
+    reason:
+      text: "search_agent.py 在 diff 中未改动；test_search_agent.py:125-126 断言无 Layered
+        memory: 通过"
+      truncated: false
+  - id: A9
+    source: brief.md
+    text: "A9: Scenario: 既有行为不破坏 WHEN 在仓库根目录运行 `uv sync` THEN 成功且无新增依赖、`uv.lock` 不变
+      AND `uv run pytest` 全部通过（离线）。"
+    result: passed
+    reason:
+      text: pyproject/uv.lock diff 为空、工作树干净；独立复跑 uv run pytest -q 得 110 passed（6.18s
+        离线）；uv sync 由 Runtime 验 exit 0
+      truncated: false
+builder_handoff:
+  candidate_id: 578bd8b3-48a0-47ee-bbdb-0c14013df715
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:8b02abf6-5466-448b-8341-a7ac4f57e34e
+  iteration: 1
+  summary:
+    text: '本轮把三层 Memory 接入 stage3 三个节点输入：memory.py 新增 memory_event(memory, *,
+      node)（返回 {type: memory, node, memory}）；nodes.py 新增
+      _planner_input/_verifier_input 与 _append_layered_memory，planner_node 入口组装
+      build_layered_memory(state, node="planner") 并率先发出 memory 事件，HumanMessage
+      改用 _planner_input（首轮/修订文本 + Layered memory: JSON），verifier_node 注入
+      _verifier_input（node="verifier"，无事件出口，签名不变）；code_agent.py 移除预留接口
+      build_memory_snapshot，新增 _code_agent_input(state, instruction,
+      memory)，run_code_agent 入口组装记忆（node="codeAgent"）并经 emit 率先发出 memory 事件（同时进
+      tool_events 与 writer），(no memory snapshot)
+      占位移除。测试更新：test_memory（memory_event 形状）、test_graph_nodes（planner
+      首轮+修订消息含可解析记忆 JSON、planner 首条事件为 memory、verifier
+      消息含记忆）、test_code_agent（消息含记忆、memory 事件居首、接口移除断言）、test_agent_loop（planner
+      首条 custom 事件为 memory，planner+codeAgent 双 memory 事件透传）、test_cli（memory
+      事件不渲染）、test_search_agent（不注入断言）。处理验收项 A1-A9 全部。'
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+  checks:
+    - name:
+        text: uv sync
+        truncated: false
+      result: passed
+      note:
+        text: 依赖安装成功，uv.lock 无变化（无新增依赖）
+        truncated: false
+    - name:
+        text: uv run pytest
+        truncated: false
+      result: passed
+      note:
+        text: 110 passed，全量离线（FakeModel + 临时 workspace）
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: verification_results 含非 dict 项时 _format_failed_verification 抛
+        AttributeError——基线既有语义原样迁移，非本次回归
+      truncated: false
+    - text: CLI 不渲染 memory 事件（非目标约定，未知事件类型静默落空）
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 独立只读复核（Explore subagent）逐条核对 A1-A9：事件顺序（planner/codeAgent 入口首事件为
+        memory、verifier 无事件）、消息拼接与 JSON 可解析性、修订分支逐字保留、循环导入无风险、state 缺键与
+        on_event/writer=None 容错、workflow.py/CLI 未改动、uv.lock 无变化、uv run pytest
+        110 passed。结论 PASS。
+      truncated: false
+    reviewer_execution_ref: explore-subagent:agent_2328076a-7077-4d14-931b-464434c649f1
+  submitted_at: 2026-09-11T03:50:33.929Z
+blockers: []
+verification:
+  candidate_id: 578bd8b3-48a0-47ee-bbdb-0c14013df715
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:038048c8-f769-4b36-9ea7-208489f77fbf
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: check-uv-sync
+      name:
+        text: uv sync 依赖安装
+        truncated: false
+      argv_display:
+        - text: sync
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 77
+    - id: check-uv-lock-unchanged
+      name:
+        text: uv.lock 无未提交变更
+        truncated: false
+      argv_display:
+        - text: status
+          truncated: false
+        - text: --porcelain
+          truncated: false
+        - text: --
+          truncated: false
+        - text: uv.lock
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 49
+    - id: check-pytest-full
+      name:
+        text: 全量离线测试 uv run pytest
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 7895
+  summary:
+    text: memory-injection 候选 e664dc8 九项验收全部通过：memory_event
+      形状、planner/codeAgent/verifier 记忆注入与事件序、build_memory_snapshot
+      移除、searchAgent 与既有行为均符合规格，110 个离线测试全绿。
+    truncated: false
+  risks:
+    - text: _format_failed_verification 与 _planner_input 失败验证过滤假定 verification_results
+        项为 dict，非 dict 项抛 AttributeError（基线既有语义，非本次引入）
+      truncated: false
+    - text: 受托 codeAgent 的 memory 事件经 workflow 桥接顶层 node 统一为 planner，Agent 身份仅由
+        memory.working_memory.node 区分（符合 spec 约定）
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-11T03:56:35.591Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: memory-injection 候选 e664dc8 九项验收全部通过：memory_event
+        形状、planner/codeAgent/verifier 记忆注入与事件序、build_memory_snapshot
+        移除、searchAgent 与既有行为均符合规格，110 个离线测试全绿。
+      truncated: false
+    completed_at: 2026-09-11T03:56:35.591Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-10T23:24:01.687Z

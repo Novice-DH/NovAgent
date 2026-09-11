@@ -220,8 +220,9 @@ src/novagent/
     - `context_summary`: `_short_text(state.get("context_summary", ""), 1600)`
     - `compression_events`: `state.get("compression_events", [])` 的最近 3 条（末尾 3 条、顺序保持）
 - `format_layered_memory_for_prompt(memory) -> str`：`json.dumps(memory, ensure_ascii=False)`；返回值可被 `json.loads` 还原为与输入相等的数据。
+- `memory_event(memory, *, node="graph") -> dict`：构造运行时的分层记忆事件，返回 dict 恰为 `{"type": "memory", "node": node, "memory": memory}`（`memory` 为传入对象本身，不复制）；纯函数，无副作用。
 - 模块同时定义 `CompressionEvent`、`LayeredMemory` 两个 TypedDict（供 `graph.state` 引用）。
-- 本模块不提供任何 memory 写工具或写函数（layered memory 由 runtime 组装，规则见 `RULES_LAYER`）。
+- 本模块不提供任何 memory 写工具或写函数（layered memory 由 runtime 组装，规则见 `RULES_LAYER`）；`memory_event` 只构造事件 dict，不是写工具。
 
 ## prompts.stage2 — 收尾系统提示（保持既有语义）
 
@@ -275,20 +276,23 @@ Rules:
 
 ## graph.nodes — 规划/执行/验证/收尾节点与路由
 
-模块 `novagent.graph.nodes` 实现 LangGraph 节点函数与条件路由。节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通 dict 更新；`model=None` 时内部 `create_model()`，支持离线注入 FakeModel。提示词导入约定：`PLANNER_PROMPT`、`VERIFIER_PROMPT` 均从 `novagent.prompts.stage3` 导入（模块级名字与常量为同一对象）。本模块不导入、不调用 `novagent.graph.memory`（分层记忆的运行时接入属后续 change）。
+模块 `novagent.graph.nodes` 实现 LangGraph 节点函数与条件路由。节点与 LangGraph 节点签名兼容：第一个位置参数为状态 dict，返回普通 dict 更新；`model=None` 时内部 `create_model()`，支持离线注入 FakeModel。提示词导入约定：`PLANNER_PROMPT`、`VERIFIER_PROMPT` 均从 `novagent.prompts.stage3` 导入（模块级名字与常量为同一对象）。分层记忆导入约定：`build_layered_memory`、`format_layered_memory_for_prompt`、`memory_event` 从 `novagent.graph.memory` 导入；planner 与 verifier 在构造 HumanMessage 前以各自节点名组装分层记忆，并把记忆 JSON 拼接进 HumanMessage。
 
+- 模块内私有辅助 `_planner_input(state, memory) -> str`：根据 state 返回 planner 的 HumanMessage 文本——`state` 存在 `todos` 且 `last_error` 非空时为修订文本（`Task: ...\n\nThe previous plan failed and must be revised.\nLast error: ...\nFailed verifications:\n...\n\nRevise the plan with the todo_write tool and delegate only the missing fix.`，失败验证行由 `_format_failed_verification` 逐条格式化），否则为首轮文本（`Task: ...\n\nCreate a plan with the todo_write tool, then delegate specialist work as needed.`）；两种文本之后统一拼接 `\n\nLayered memory:\n` + `format_layered_memory_for_prompt(memory)`。
+- 模块内私有辅助 `_verifier_input(state, memory) -> str`：返回 verifier 的 HumanMessage 文本——既有验收文本（`Task: ...`、`Plan summary: ...`、`Acceptance criteria:`、`Verification commands (already executed):`、`Last actor output:` 与 JSON 回复格式要求）之后拼接 `\n\nLayered memory:\n` + `format_layered_memory_for_prompt(memory)`。
 - `planner_node(state, *, model=None, on_event=None, max_loops=10) -> dict`：
-  1. `tools = [create_todo_write_tool(), call_search_agent 工具, call_code_agent 工具]`（恰 3 个）；`agent = model.bind_tools(tools)`；
-  2. 委托工具为闭包实现的 `StructuredTool`（内部实现 `_call_search_agent_tool(state, writer, instruction)` / `_call_code_agent_tool(state, writer, instruction)`，`writer` 为 `on_event` 包装：`on_event=None` 时事件仅收集、不外发）；
-  3. 状态 `todos` 为空 → 首次生成：消息 `[SystemMessage(PLANNER_PROMPT), HumanMessage(task)]`；已有 `todos` 且 `last_error` 非空 → 修订：HumanMessage 额外携带 `last_error` 与最近失败的验证信息，要求修订并只委托缺失修复；
-  4. 手写 ReAct 循环最多 `max_loops=10` 轮：每轮 `response = agent.invoke(messages)` 并追加、发 `{"type": "ai_message", "content": <AI 文本>}`；无 `tool_calls` 立即结束；否则逐个 tool_call：执行前发 `{"type": "tool_call", "name": ..., "args": ...}`，结果以 `ToolMessage(json.dumps(result))` 回传，执行后发 `{"type": "tool_result", "name": ..., "result": ...}`；
-  5. `todo_write` tool_call：从 args 提取 `plan_summary`、`todos`（补齐缺失键、非法 status 归一 `"pending"`）、`acceptance_criteria`、`verification_commands`（多次调用取最后一次）；
-  6. `call_search_agent` tool_call（args `{instruction: str}`）：先发 `{"type": "handoff", "from": "planner", "to": "searchAgent", "instruction": ...}`，调用 `run_search_agent(<合并视图>, instruction, writer=writer, model=model)`（合并视图 = state 叠加本节点内已产生的 `todos`/`research_notes` 更新，`model` 为 planner 收到的注入模型，保证多次委托链式一致且可离线注入）；状态更新——`research_notes` 追加 agent summary（已有内容以空行连接）、`sources` 按 url 去重保序合并 `SourceItem`（从 ok 的 `search_results` 事件提取 title/url/content/score，无明细时仅 url）、`agent_handoffs` 追加 `{"from_agent": "planner", "to_agent": "searchAgent", "instruction", "result": <summary>}`；
-  7. `call_code_agent` tool_call（args `{instruction: str}`）：先发 `{"type": "handoff", "from": "planner", "to": "codeAgent", "instruction": ...}`，调用 `run_code_agent(<合并视图>, instruction, writer=writer, model=model)`；状态更新——`todos` 取该次委托返回的 todos、`code_agent_summary` 为 agent summary、`agent_handoffs` 追加 `{"from_agent": "planner", "to_agent": "codeAgent", "instruction", "result"}`、`messages` 并入委托新增的 AIMessage/ToolMessage；
-  8. 返回更新 dict：计划四字段（发生 `todo_write` 时）+ `research_notes`/`sources`/`agent_handoffs`/`code_agent_summary`/`todos`/`messages`（发生对应委托时，仅包含有更新的键）。
+  1. 入口（绑定工具之前）构造分层记忆 `memory = build_layered_memory(state, node="planner")`，并经事件通道发出 `memory_event(memory, node="planner")`（`on_event=None` 时仅丢弃、不报错）；该事件先于本节点所有其他事件；
+  2. `tools = [create_todo_write_tool(), call_search_agent 工具, call_code_agent 工具]`（恰 3 个）；`agent = model.bind_tools(tools)`；
+  3. 委托工具为闭包实现的 `StructuredTool`（内部实现 `_call_search_agent_tool(state, writer, instruction)` / `_call_code_agent_tool(state, writer, instruction)`，`writer` 为 `on_event` 包装：`on_event=None` 时事件仅收集、不外发）；
+  4. 初始消息为 `[SystemMessage(PLANNER_PROMPT), HumanMessage(_planner_input(state, memory))]`：状态 `todos` 为空 → 首次生成文本；已有 `todos` 且 `last_error` 非空 → 修订文本（额外携带 `last_error` 与最近失败的验证信息，要求修订并只委托缺失修复）；两种文本均含分层记忆 JSON；
+  5. 手写 ReAct 循环最多 `max_loops=10` 轮：每轮 `response = agent.invoke(messages)` 并追加、发 `{"type": "ai_message", "content": <AI 文本>}`；无 `tool_calls` 立即结束；否则逐个 tool_call：执行前发 `{"type": "tool_call", "name": ..., "args": ...}`，结果以 `ToolMessage(json.dumps(result))` 回传，执行后发 `{"type": "tool_result", "name": ..., "result": ...}`；
+  6. `todo_write` tool_call：从 args 提取 `plan_summary`、`todos`（补齐缺失键、非法 status 归一 `"pending"`）、`acceptance_criteria`、`verification_commands`（多次调用取最后一次）；
+  7. `call_search_agent` tool_call（args `{instruction: str}`）：先发 `{"type": "handoff", "from": "planner", "to": "searchAgent", "instruction": ...}`，调用 `run_search_agent(<合并视图>, instruction, writer=writer, model=model)`（合并视图 = state 叠加本节点内已产生的 `todos`/`research_notes` 更新，`model` 为 planner 收到的注入模型，保证多次委托链式一致且可离线注入）；状态更新——`research_notes` 追加 agent summary（已有内容以空行连接）、`sources` 按 url 去重保序合并 `SourceItem`（从 ok 的 `search_results` 事件提取 title/url/content/score，无明细时仅 url）、`agent_handoffs` 追加 `{"from_agent": "planner", "to_agent": "searchAgent", "instruction", "result": <summary>}`；
+  8. `call_code_agent` tool_call（args `{instruction: str}`）：先发 `{"type": "handoff", "from": "planner", "to": "codeAgent", "instruction": ...}`，调用 `run_code_agent(<合并视图>, instruction, writer=writer, model=model)`；状态更新——`todos` 取该次委托返回的 todos、`code_agent_summary` 为 agent summary、`agent_handoffs` 追加 `{"from_agent": "planner", "to_agent": "codeAgent", "instruction", "result"}`、`messages` 并入委托新增的 AIMessage/ToolMessage；
+  9. 返回更新 dict：计划四字段（发生 `todo_write` 时）+ `research_notes`/`sources`/`agent_handoffs`/`code_agent_summary`/`todos`/`messages`（发生对应委托时，仅包含有更新的键）。
 - `verifier_node(state, *, model=None) -> dict`：
-  1. 从 `state["runtime"]` 取 `RuntimeState`（缺失抛 `ValueError`）；`tools = build_read_only_tools(runtime) + [create_bash_tool(runtime), WebSearchTool]`（恰 4 个：`read_file`/`grep`/`bash`/`web_search`）；
-  2. 消息 `[SystemMessage(VERIFIER_PROMPT), HumanMessage(计划 + 验收标准 + 验证命令 + 最近执行输出)]`；ReAct 循环（同语义、`max_loops=10`，无事件上报）；「最近执行输出」取 `state.get("last_actor_summary", "")`——stage3 中该字段不再由图内节点产生、通常为空；bash 的只读性由提示词约束（安全检查），验证命令的程序化执行（下述第 4 步）保持不变，`web_search` 缺 `TAVILY_API_KEY` 时走既有错误降级；
+  1. 从 `state["runtime"]` 取 `RuntimeState`（缺失抛 `ValueError`）；`tools = build_read_only_tools(runtime) + [create_bash_tool(runtime), WebSearchTool]`（恰 4 个：`read_file`/`grep`/`bash`/`web_search`）；入口构造分层记忆 `memory = build_layered_memory(state, node="verifier")`；verifier 无事件出口，不发 memory 事件；
+  2. 消息 `[SystemMessage(VERIFIER_PROMPT), HumanMessage(_verifier_input(state, memory))]`（计划 + 验收标准 + 验证命令 + 最近执行输出 + 分层记忆 JSON）；ReAct 循环（同语义、`max_loops=10`，无事件上报）；「最近执行输出」取 `state.get("last_actor_summary", "")`——stage3 中该字段不再由图内节点产生、通常为空；bash 的只读性由提示词约束（安全检查），验证命令的程序化执行（下述第 4 步）保持不变，`web_search` 缺 `TAVILY_API_KEY` 时走既有错误降级；
   3. 最终 AI 文本解析 JSON `{passed, reason, checks, recommended_next_instruction}`（容忍代码围栏）；解析失败按判定失败处理；
   4. 同时用 `execute_command` 逐条运行 `verification_commands`（workspace 为 cwd，默认 30 秒超时），构造 `VerificationResult`：`ok = exit_code == 0`；超时/异常 → `exit_code=None`、`ok=False`、stderr 记录错误信息；
   5. 整体 `passed = llm_passed and all(command ok)`；
@@ -304,7 +308,7 @@ Rules:
 
 - `build_workflow(*, model=None)`：
   - `graph = StateGraph(NovGraphState)`；
-  - 注册节点：`"planner"` → 图内包装——经 `functools.partial` 绑定注入的 `model`，执行时调用 `langgraph.config.get_stream_writer()`，把每个事件复制并补 `"node": "planner"` 后作为 `on_event` 传给 `planner_node`（协调事件进入 custom 流；`invoke()` 等不消费 custom 流的场景下 writer 静默丢弃）；`"verifier"` → `verifier_node`（经 `functools.partial` 绑定注入的 `model`）；`"final"` → `final_node`；不注册 `"actor"`；
+  - 注册节点：`"planner"` → 图内包装——经 `functools.partial` 绑定注入的 `model`，执行时调用 `langgraph.config.get_stream_writer()`，把每个事件复制并补 `"node": "planner"` 后作为 `on_event` 传给 `planner_node`（协调事件含分层记忆事件 `{"type": "memory", ...}` 与受托专家 Agent 的内部事件进入 custom 流，事件顶层 `node` 统一为 `"planner"`，Agent 身份由 `memory.working_memory.node` 区分；`invoke()` 等不消费 custom 流的场景下 writer 静默丢弃）；`"verifier"` → `verifier_node`（经 `functools.partial` 绑定注入的 `model`）；`"final"` → `final_node`；不注册 `"actor"`；
   - 边：`START → "planner"`、`"planner" → "verifier"`；
   - `"verifier"` 经 `verifier_route` 条件边路由：`{"final": "final", "planner": "planner"}`；
   - `"final" → END`；
@@ -372,10 +376,10 @@ Rules:
 - End with a concise summary of files changed and checks run.
 ```
 
-- 模块函数 `build_memory_snapshot(state) -> str`：layered memory 快照的预留接口，返回空字符串（不调用 LLM、无网络、无副作用）；本 change 不接入 `novagent.graph.memory`，真实快照属后续 change。
+- 模块内私有辅助 `_code_agent_input(state, instruction, memory) -> str`：返回 codeAgent 的 HumanMessage 文本——依次包含任务（`state.get("task", "")`）、`instruction`、session 上下文（`state.get("session_context", "")`，缺失时标注 `(no session context)`），最后以 `Layered memory:` 标头拼接 `format_layered_memory_for_prompt(memory)` 的完整 JSON；不再包含 `(no memory snapshot)` 占位。
 - `run_code_agent(state, instruction, *, writer=None, max_loops=10, model=None) -> dict`：
-  1. 从 `state["runtime"]` 取 `RuntimeState`（缺失或为 None 抛 `ValueError`，与 `actor_node` 一致）；`tools = build_tools(runtime) + [create_todo_update_tool()]`（恰 6 个）；`model=None` 时内部 `create_model()`；`agent = model.bind_tools(tools)`；
-  2. 初始消息 `[SystemMessage(CODE_AGENT_PROMPT), HumanMessage(human_text)]`；`human_text` 依次包含任务（`state.get("task", "")`）、`instruction`、session 上下文（`state.get("session_context", "")`，缺失时标注 `(no session context)`）与 memory 快照（`build_memory_snapshot(state)` 为空时标注 `(no memory snapshot)`）；
+  1. 从 `state["runtime"]` 取 `RuntimeState`（缺失或为 None 抛 `ValueError`，与 `actor_node` 一致）；`tools = build_tools(runtime) + [create_todo_update_tool()]`（恰 6 个）；`model=None` 时内部 `create_model()`；`agent = model.bind_tools(tools)`；入口构造分层记忆 `memory = build_layered_memory(state, node="codeAgent")` 并发 `memory_event(memory, node="codeAgent")`（经 `emit`：同时收集进 `tool_events` 首位并逐个调用 `writer`）；
+  2. 初始消息 `[SystemMessage(CODE_AGENT_PROMPT), HumanMessage(_code_agent_input(state, instruction, memory))]`；
   3. 手写 ReAct 循环最多 `max_loops` 轮（默认 10）：每轮 `response = agent.invoke(messages)` 并追加消息、发 `{"type": "ai_message", "content": <AI 文本>}`；无 `tool_calls` 立即结束；否则逐个 tool_call：
      - 执行前发 `{"type": "tool_call", "name": <工具名>, "args": <call args>}`；
      - 未知工具（含提示词提及但未绑定的 notepad 工具）结果文本为 `Error: unknown tool <name>`；工具执行异常转为 `Error: <异常信息>`（与 `graph.nodes._execute_tool` 同语义）；
@@ -467,16 +471,18 @@ Rules:
      - `node_output` + `verifier` → `✅ Verifier`（通过）或 `❌ Verifier`（失败）+ reason + 每条验证命令的退出码结果；
      - `node_output` + `final` → `📝 Final` + 最终回答；
      - `node="actor"` 的 `final_answer` 内部事件与 `node_output`+`actor` 忽略（内容已被其他事件覆盖）；
-     - `node="planner"` 的内部事件（`ai_message`/`tool_call`/`tool_result`/`handoff` 及受托 agent 事件）当前不渲染——CLI 渲染分支为后续 change 预留，不影响事件流本身。
+     - `node="planner"` 的内部事件（`memory`/`ai_message`/`tool_call`/`tool_result`/`handoff` 及受托 agent 事件）当前不渲染——CLI 渲染分支为后续 change 预留，不影响事件流本身。
 - `python -m novagent` 与控制台脚本 `novagent` 行为一致（`__main__.py` 调用 `cli.app`）。
 
 ## tests
 
-- `tests/test_memory.py` 新增（纯函数离线测试，不调用模型、不发起网络请求）：`RULES_LAYER` 常量结构（scope/storage/5 条规则逐字）；`build_layered_memory` 返回恰含三层且 `working_memory` 16 键、`history_summary_store` 8 键齐全；workspace 有/无 `NOTEPAD.md` 与 `HISTORY_SUMMARY.md` 时 `read_notepad`/`read_history_summary` 的 exists/content 行为（缺失不抛异常）；`_short_text` 截断（结果 ≤ limit 且以 "..." 结尾）与短文本原样；`_trim_handoffs` 超 6 条保留最近 6 条且顺序保持；`sources` 收敛为仅 title/url；`context_summary` 截断与 `compression_events` 最近 3 条；`format_layered_memory_for_prompt` 返回可 `json.loads` 且与输入相等；`NovGraphState` 含 8 个新字段；空 state 容错（不抛异常、占位值正确）；
-- `tests/test_agent_loop.py` 保持 stage3 协调语义覆盖（FakeModel 离线驱动整图）：通过路径（planner 轮 1 `todo_write` 发布计划、轮 2 `call_code_agent` 委托实现、轮 3 纯文本结束 → verifier 输出 `passed=true` JSON → final），事件顺序（planner `node_output` → planner 内部事件（带 `node="planner"`，含 `handoff`）→ verifier `node_output` → final `node_output`），`final_answer` 以 "Task completed" 开头，文件落盘；失败回环（planner 收到含 `last_error` 的修订 HumanMessage 后 `todo_write` 修订，最终通过）；`max_attempts=1` 预算耗尽直接 final；
-- `tests/test_cli.py`：`--help` 含 `--max-attempts` 与 `--workspace`；workspace 自动创建与缺 key 清晰报错（退出码 1）；统一事件格式的 fake 流驱动 CLI 渲染——输出依次包含 📋 Planner、🔧 Actor、✅ Verifier、📝 Final 与工具详情、最终回答；fake 断言 `--max-attempts` 默认 3 与显式传值生效；
-- `tests/test_graph_nodes.py` 保持：planner 绑定工具恰为 `["todo_write", "call_search_agent", "call_code_agent"]`；消息构造（首次生成与含 `last_error` 的修订 HumanMessage）；`todo_write` 计划归一化与多次调用取最后一次；委托语义——`call_search_agent`/`call_code_agent` 先发 `handoff` 事件再调 `run_search_agent`/`run_code_agent`，状态更新（`research_notes` 追加、`sources` 按 url 去重保序、`agent_handoffs` 记录、`code_agent_summary`、`todos`、`messages`）；循环边界；`novagent.graph.nodes` 不含 `actor_node`；verifier 断言（`VERIFIER_PROMPT` 为 stage3 同一对象、绑定工具恰 4 个 read_file/grep/bash/web_search）；
+- `tests/test_memory.py` 更新（纯函数离线测试，不调用模型、不发起网络请求）：既有覆盖保持（`RULES_LAYER` 常量结构（scope/storage/5 条规则逐字）；`build_layered_memory` 返回恰含三层且 `working_memory` 16 键、`history_summary_store` 8 键齐全；workspace 有/无 `NOTEPAD.md` 与 `HISTORY_SUMMARY.md` 时 `read_notepad`/`read_history_summary` 的 exists/content 行为（缺失不抛异常）；`_short_text` 截断（结果 ≤ limit 且以 "..." 结尾）与短文本原样；`_trim_handoffs` 超 6 条保留最近 6 条且顺序保持；`sources` 收敛为仅 title/url；`context_summary` 截断与 `compression_events` 最近 3 条；`format_layered_memory_for_prompt` 返回可 `json.loads` 且与输入相等；`NovGraphState` 含 8 个新字段；空 state 容错）；新增 `memory_event` 形状覆盖（返回恰为 `{"type": "memory", "node", "memory"}`、默认 `node="graph"`、`memory` 为传入对象本身）；
+- `tests/test_agent_loop.py` 更新 stage3 协调语义覆盖（FakeModel 离线驱动整图）：通过路径（planner 轮 1 `todo_write` 发布计划、轮 2 `call_code_agent` 委托实现、轮 3 纯文本结束 → verifier 输出 `passed=true` JSON → final），事件顺序（planner `node_output` → planner 内部事件（带 `node="planner"`，首条为 `type="memory"` 事件，含 `handoff`）→ verifier `node_output` → final `node_output`），`final_answer` 以 "Task completed" 开头，文件落盘；失败回环（planner 收到含 `last_error` 的修订 HumanMessage 后 `todo_write` 修订，最终通过）；`max_attempts=1` 预算耗尽直接 final；
+- `tests/test_cli.py`：保持既有覆盖（`--help` 含 `--max-attempts` 与 `--workspace`；workspace 自动创建与缺 key 清晰报错（退出码 1）；统一事件格式的 fake 流驱动 CLI 渲染——输出依次包含 📋 Planner、🔧 Actor、✅ Verifier、📝 Final 与工具详情、最终回答；fake 断言 `--max-attempts` 默认 3 与显式传值生效）；`memory` 事件类型不渲染、不影响渲染流程；
+- `tests/test_graph_nodes.py` 更新：planner 绑定工具恰为 `["todo_write", "call_search_agent", "call_code_agent"]`；消息构造（首次生成与含 `last_error` 的修订 HumanMessage）断言 HumanMessage 含 `format_layered_memory_for_prompt(memory)` 原文且解析后 `working_memory.node == "planner"`；planner 首条事件为 `{"type": "memory", "node": "planner", ...}` 且先于任何 `ai_message`；`todo_write` 计划归一化与多次调用取最后一次；委托语义——`call_search_agent`/`call_code_agent` 先发 `handoff` 事件再调 `run_search_agent`/`run_code_agent`，状态更新（`research_notes` 追加、`sources` 按 url 去重保序、`agent_handoffs` 记录、`code_agent_summary`、`todos`、`messages`）；循环边界；`novagent.graph.nodes` 不含 `actor_node`；verifier 断言（`VERIFIER_PROMPT` 为 stage3 同一对象、绑定工具恰 4 个 read_file/grep/bash/web_search，HumanMessage 含分层记忆 JSON 且 `working_memory.node == "verifier"`）；
 - `tests/test_graph_workflow.py` 保持：编译图节点集合恰为 `{"planner", "verifier", "final"}`，`START → planner`、`planner → verifier`、verifier 条件边、`final → END`；planner 桥接事件带 `node="planner"`；端到端 verifier 绑定恰为 `["read_file", "grep", "bash", "web_search"]`；
-- `tests/test_graph_state.py` 更新：`NovGraphState` 新增 8 字段（`context_summary`/`context_token_count`/`context_token_limit`/`context_should_compress`/`context_next_node`/`compression_events`/`memory_snapshot`/`history_summary`）与 `CompressionEvent`/`LayeredMemory` 类型，`add_messages` 语义不变；
-- `tests/test_web_search_tool.py`、`tests/test_search_agent.py`、`tests/test_code_agent.py`、`tests/test_registry.py`、`tests/test_file_tools.py`、`tests/test_grep_tool.py`、`tests/test_bash_tool.py`、`tests/test_paths.py`、`tests/test_openai_provider.py` 保持既有覆盖；
+- `tests/test_graph_state.py` 保持：`NovGraphState` 含 8 个记忆/压缩字段（`context_summary`/`context_token_count`/`context_token_limit`/`context_should_compress`/`context_next_node`/`compression_events`/`memory_snapshot`/`history_summary`）与 `CompressionEvent`/`LayeredMemory` 类型，`add_messages` 语义不变；
+- `tests/test_code_agent.py` 更新：消息构造断言首条 HumanMessage 含 Task/Instruction/Session context 与 `format_layered_memory_for_prompt(memory)` 原文（解析后 `working_memory.node == "codeAgent"`），不含 `(no memory snapshot)` 占位；首条事件为 memory 事件且同时位于返回 `tool_events` 首位；`build_memory_snapshot` 属性不再存在；其余既有覆盖（ReAct 循环、`todo_update` 合并、未知工具降级、返回 dict 结构）保持；
+- `tests/test_search_agent.py` 保持既有覆盖：`run_search_agent` 的 HumanMessage 不注入分层记忆（范围外行为不变）；
+- `tests/test_web_search_tool.py`、`tests/test_registry.py`、`tests/test_file_tools.py`、`tests/test_grep_tool.py`、`tests/test_bash_tool.py`、`tests/test_paths.py`、`tests/test_openai_provider.py` 保持既有覆盖；
 - 全部测试离线运行，不发起真实网络请求。
